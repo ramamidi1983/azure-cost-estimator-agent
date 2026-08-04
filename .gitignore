@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Agent runtime artifacts
+.cache/
+output/
+*.xlsx
+
+# OS
+.DS_Store
+Thumbs.db

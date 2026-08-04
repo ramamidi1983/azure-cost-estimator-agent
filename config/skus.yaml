@@ -1,0 +1,82 @@
+# ============================================================================
+# Azure Cost Estimator - SKU catalog, disposition mapping, PaaS/SaaS rates
+# ============================================================================
+
+# ---- VM catalog for auto-sizing (smallest SKU that fits vcpu & memory) ----
+vm_catalog:
+  - {sku: Standard_D2s_v5, vcpu: 2,  mem: 8}
+  - {sku: Standard_D4s_v5, vcpu: 4,  mem: 16}
+  - {sku: Standard_D8s_v5, vcpu: 8,  mem: 32}
+  - {sku: Standard_D16s_v5, vcpu: 16, mem: 64}
+  - {sku: Standard_D32s_v5, vcpu: 32, mem: 128}
+  - {sku: Standard_E2s_v5, vcpu: 2,  mem: 16}
+  - {sku: Standard_E4s_v5, vcpu: 4,  mem: 32}
+  - {sku: Standard_E8s_v5, vcpu: 8,  mem: 64}
+  - {sku: Standard_E16s_v5, vcpu: 16, mem: 128}
+  - {sku: Standard_E32s_v5, vcpu: 32, mem: 256}
+
+# ---- App Service Premium v3 catalog (auto-pick by vcpu/mem) ----
+appservice_catalog:
+  - {sku: "P1 v3", vcpu: 2, mem: 8}
+  - {sku: "P2 v3", vcpu: 4, mem: 16}
+  - {sku: "P3 v3", vcpu: 8, mem: 32}
+
+# ---- Redis catalog (auto-pick by memory GB) ----
+redis_catalog:
+  - {sku: "C1", mem: 1,  tier: Standard}
+  - {sku: "C3", mem: 6,  tier: Standard}
+  - {sku: "C5", mem: 26, tier: Standard}
+  - {sku: "P1", mem: 6,  tier: Premium}
+
+# ---- PaaS database defaults (compute $/vCore/hr, storage $/GB/mo) ----
+# Flex servers priced from these curated GP rates (live API v5 meters are noisy);
+# SQL DB uses live reserved rates. Edit freely.
+paas_db:
+  sqldb_gp_storage_gb_mo: 0.115
+  postgres_gp_vcore_hr: 0.115
+  postgres_storage_gb_mo: 0.115
+  mysql_gp_vcore_hr: 0.118
+  mysql_storage_gb_mo: 0.115
+  cosmos_ru_100_hr: 0.008
+  cosmos_storage_gb_mo: 0.25
+
+# ---- Approx reserved discount factors for services without live savings-plan ----
+term_factors:
+  payg: 1.00
+  1y: 0.62
+  3y: 0.45
+
+# ---- Fixed monthly add-on rates ----
+addons:
+  expressroute_gateway_ergw1az_hr: 0.361
+  expressroute_circuit_1gbps_mo: 436.0
+  app_gateway_waf_fixed_hr: 0.36
+  app_gateway_waf_cu_hr: 0.0144
+  standard_lb_mo: 25.0
+  asr_instance_mo: 25.0
+
+# ============================================================================
+# Migration disposition -> strategy bucket (the "7 R's").
+# Drives IaaS vs PaaS vs Container vs Modernize vs SaaS selection.
+# If a row has no disposition AND no explicit target -> defaults to IaaS (vm).
+# ============================================================================
+disposition_map:
+  rehost: iaas
+  "lift and shift": iaas
+  "lift-and-shift": iaas
+  iaas: iaas
+  replatform: paas
+  paas: paas
+  refactor: container
+  containerize: container
+  container: container
+  aks: container
+  rearchitect: modernize
+  rebuild: modernize
+  modernize: modernize
+  "cloud native": modernize
+  repurchase: saas
+  saas: saas
+  retire: skip
+  retain: skip
+  decommission: skip
