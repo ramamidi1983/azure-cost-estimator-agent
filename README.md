@@ -59,19 +59,47 @@ Pick based on how "always-on" and how shared it needs to be:
 **Recommendation:** **Azure Container Apps** with **Entra ID auth** and a **user-assigned managed identity**. The Retail Prices API is public (no key), so the only secrets you need are for optional Azure OpenAI (see below). Put the SKU-mapping `config/` in the image and mount `output/` to a storage share if you want to keep generated workbooks.
 
 ### Containerize (for App Service or Container Apps)
-```dockerfile
-FROM python:3.12-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-EXPOSE 8501
-CMD ["streamlit","run","app.py","--server.port=8501","--server.address=0.0.0.0"]
+A production `Dockerfile` is included (Python 3.12-slim, Streamlit on port 8501, health check).
+
+## Deploy & host on Azure (end-to-end automation)
+
+Everything is scripted — infrastructure as code + one command + auto-deploy on every push.
+
+**What gets created:** Resource Group → Azure Container Registry → Log Analytics → Container Apps Environment → Container App (scale-to-zero) → a GitHub **OIDC** app registration + federated credential + role assignments (no secrets stored).
+
+**Prereqs:** `az login` and `gh auth login` (already authenticated).
+
+```powershell
+# One command provisions Azure AND wires up CI/CD:
+./deploy/provision.ps1 `
+  -ResourceGroup rg-cost-estimator `
+  -Location eastus `
+  -GitHubRepo ramamidi1983/azure-cost-estimator-agent
 ```
-```bash
-az containerapp up --name cost-estimator --resource-group rg-tools \
+
+The script prints the live dashboard URL, e.g. `https://cost-estimator.<region>.azurecontainerapps.io`.
+
+**Continuous deployment:** after provisioning, every push to `main` triggers
+`.github/workflows/deploy.yml`, which logs in with OIDC, runs `az acr build`, and
+updates the Container App to the new image. Config is passed via GitHub Actions
+**repo variables** (set automatically by the provision script):
+`AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, ACR_NAME, CONTAINERAPP_NAME`.
+
+**Files**
+| File | Purpose |
+|---|---|
+| `Dockerfile` / `.dockerignore` | Container image for the dashboard |
+| `infra/main.bicep` | Log Analytics + ACA env + managed identity (AcrPull) + Container App |
+| `deploy/provision.ps1` | One-shot: RG + ACR + image build + Bicep deploy + GitHub OIDC/CI wiring |
+| `.github/workflows/deploy.yml` | Build → push → deploy on every `main` push (OIDC, no secrets) |
+
+**Quick manual alternative** (no CI/CD):
+```powershell
+az containerapp up --name cost-estimator --resource-group rg-cost-estimator `
   --source . --ingress external --target-port 8501 --env-vars STREAMLIT_SERVER_HEADLESS=true
 ```
+
+> Add **Entra ID (Easy Auth)** on the Container App to require sign-in. The Retail Prices API is public (no key), so no app secrets are required.
 
 ## Roadmap / making it more "agentic"
 - **LLM-assisted sizing** (optional): add an Azure OpenAI step that reads a messy inventory or an RFP PDF and proposes `target`/`vcpu`/`memory_gb` before pricing. Keep it human-in-the-loop.
