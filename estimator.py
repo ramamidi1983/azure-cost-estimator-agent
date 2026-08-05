@@ -16,6 +16,7 @@ Inventory columns (CSV/XLSX, case-insensitive):
   azure_sku(optional), unit_price(SaaS $/user/mo)
 """
 import os
+import re
 import pandas as pd
 import yaml
 import pricing as P
@@ -23,6 +24,85 @@ import pricing as P
 CFG = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "config", "skus.yaml")))
 HOURS = P.HOURS_PER_MONTH
 TF = CFG["term_factors"]
+
+
+# ---------------------------------------------------------------- column mapping
+# Ordered canonical schema -> accepted header variants. Earlier canonicals claim a
+# source column first. Lets users upload inventories in many different formats.
+_COLUMN_ALIASES = [
+    ("name", ["name", "host name", "hostname", "server name", "servername", "server",
+              "vm name", "machine name", "host", "node name", "computer name"]),
+    ("environment", ["environment", "env", "tier", "stage"]),
+    ("role", ["role", "server type", "workload type", "workload", "type", "function",
+              "application", "app", "app name", "component"]),
+    ("disposition", ["disposition", "migration disposition", "migration strategy",
+                     "strategy", "6r", "r disposition", "recommendation"]),
+    ("target", ["target", "azure target", "target service", "azure service", "target platform"]),
+    ("vcpu", ["vcpu", "vcpus", "cpu", "cpus", "cores", "core", "processors",
+              "req vcpu", "vcpu count", "num cpu", "cpu count", "logical processors"]),
+    ("memory_gb", ["memory gb", "memory", "ram", "ram gb", "mem", "memory gib",
+                   "ram gib", "memory mb", "memory mib", "ram mb", "ram mib"]),
+    ("os", ["os", "operating system", "platform", "os type", "guest os"]),
+    ("storage_gb", ["storage gb", "storage", "disk", "disk gb", "disk capacity",
+                    "total disk capacity mib", "total disk capacity", "total disk",
+                    "storage gib", "used storage gb", "provisioned storage gb", "disk mib"]),
+    ("quantity", ["quantity", "qty", "count", "instances", "instance count", "nodes", "node count"]),
+    ("hours", ["hours", "hours mo", "hours month", "monthly hours", "run hours"]),
+    ("azure_sku", ["azure sku", "sku", "vm sku", "instance type", "azure type", "vm size", "size"]),
+    ("unit_price", ["unit price", "license cost", "price per user", "unit cost", "list price"]),
+]
+_NUMERIC = ["vcpu", "memory_gb", "storage_gb", "quantity", "hours", "unit_price"]
+
+
+def _norm_key(s):
+    return re.sub(r"[^a-z0-9]+", " ", str(s).strip().lower()).strip()
+
+
+def _normalize_columns(df):
+    """Map arbitrary inventory headers onto the canonical schema + coerce/convert units.
+    Pure pandas; no network or threads. Idempotent."""
+    df = df.copy()
+    norm_to_orig = {}
+    for c in df.columns:
+        norm_to_orig.setdefault(_norm_key(c), c)
+    rename, claimed = {}, set()
+    src_header = {}  # canonical -> original header (for unit detection)
+    for canonical, variants in _COLUMN_ALIASES:
+        if canonical in claimed:
+            continue
+        for v in [canonical] + variants:
+            key = _norm_key(v)
+            if key in norm_to_orig and norm_to_orig[key] not in rename:
+                orig = norm_to_orig[key]
+                rename[orig] = canonical
+                src_header[canonical] = _norm_key(orig)
+                claimed.add(canonical)
+                break
+    df = df.rename(columns=rename)
+    # numeric coercion
+    for col in _NUMERIC:
+        if col in df.columns:
+            df[col] = (df[col].astype(str)
+                       .str.replace(",", "", regex=False)
+                       .str.extract(r"(-?\d+\.?\d*)")[0])
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    # unit conversion for memory / storage based on the original header token
+    for col in ("memory_gb", "storage_gb"):
+        if col in df.columns:
+            hdr = src_header.get(col, "")
+            toks = set(hdr.split())
+            if {"mib", "mb"} & toks:
+                df[col] = df[col] / 1024.0
+            elif {"tib", "tb"} & toks:
+                df[col] = df[col] * 1024.0
+            elif {"kib", "kb"} & toks:
+                df[col] = df[col] / (1024.0 ** 2)
+            elif not ({"gib", "gb"} & toks):
+                # No explicit unit: infer MB if the values are implausibly large for GB.
+                nz = df[col][df[col] > 0]
+                if len(nz) and nz.median() > 1024:
+                    df[col] = df[col] / 1024.0
+    return df
 PDB = CFG["paas_db"]
 
 
@@ -190,7 +270,7 @@ def cost_saas(users, unit_price):
 
 # ---------------------------------------------------------------- main estimate
 def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False):
-    df = df.rename(columns={c: c.strip().lower() for c in df.columns})
+    df = _normalize_columns(df)
     rows = []
     for _, r in df.iterrows():
         name = str(r.get("name", "unnamed"))
@@ -274,7 +354,7 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False):
 # ---------------------------------------------------------------- modernization compare
 def modernization(df, region="eastus", term="1y", ahb=False):
     """For each APP-type workload, compare cost across modernization paths."""
-    df = df.rename(columns={c: c.strip().lower() for c in df.columns})
+    df = _normalize_columns(df)
     out = []
     for _, r in df.iterrows():
         name = str(r.get("name", "unnamed"))
