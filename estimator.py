@@ -188,6 +188,41 @@ def cost_saas(users, unit_price):
             "monthly": (users or 0) * (unit_price or 0)}
 
 
+def apply_row_edits(df, row_edits):
+    """Apply AI 'row_edits' to the raw inventory DataFrame (in place on a copy) and return it.
+    Each edit: {match: <name substr>, set: {vcpu, memory_gb, quantity, os, target,
+    disposition, hours, unit_price}}. Matches on the 'name' column (case-insensitive substring)."""
+    if df is None or df.empty or not row_edits:
+        return df
+    out = df.copy()
+    cols = {c.strip().lower(): c for c in out.columns}
+    key_map = {"vcpu": "vcpu", "memory_gb": "memory_gb", "quantity": "quantity", "os": "os",
+               "target": "target", "disposition": "disposition", "hours": "hours",
+               "unit_price": "unit_price"}
+    name_col = cols.get("name")
+    if not name_col:
+        return out
+    for edit in row_edits:
+        match = str(edit.get("match", "")).strip()
+        sets = edit.get("set") or {}
+        if not match or not sets:
+            continue
+        mask = out[name_col].astype(str).str.contains(match, case=False, regex=False)
+        if not mask.any():
+            continue
+        for k, v in sets.items():
+            col_key = key_map.get(k)
+            if not col_key:
+                continue
+            col = cols.get(col_key)
+            if col is None:  # create the column if the inventory lacks it
+                col = col_key
+                out[col] = ""
+                cols[col_key] = col
+            out.loc[mask, col] = v
+    return out
+
+
 # ---------------------------------------------------------------- main estimate
 def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False):
     df = df.rename(columns={c: c.strip().lower() for c in df.columns})
@@ -246,19 +281,28 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False):
         rows.append(base)
 
     lines = pd.DataFrame(rows)
+    summ = build_summary(lines, resiliency)
+    return lines, summ
 
+
+def build_summary(lines, resiliency=False):
+    """Build the area-grouped summary DataFrame (with optional resiliency add-in + TOTAL)
+    from a lines DataFrame. Kept separate so overrides can recompute without re-pricing."""
+    if lines is None or lines.empty:
+        return pd.DataFrame(columns=["area", "monthly", "annual"])
+    lines = lines.copy()
     resil_total = 0.0
-    if resiliency and not lines.empty:
+    if resiliency:
         prod = lines[lines["environment"].str.lower().str.startswith("prod")]
         db_ha = prod[prod["model"].str.contains("SQL|Hyperscale|PostgreSQL|MySQL|Cosmos", regex=True)]["monthly"].sum()
         vm_asr = prod[prod["model"].str.contains("VM|AKS")]["quantity"].sum() * CFG["addons"]["asr_instance_mo"]
         resil_total = db_ha + vm_asr
 
     def area(row):
-        e = row["environment"].lower()
+        e = str(row["environment"]).lower()
         if not e.startswith("prod"):
             return "Non-Production"
-        return "Prod - " + row["model"]
+        return "Prod - " + str(row["model"])
     lines["area"] = lines.apply(area, axis=1)
     summ = lines.groupby("area", as_index=False)["monthly"].sum()
     if resil_total:
@@ -267,7 +311,44 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False):
     summ["annual"] = summ["monthly"] * 12
     total = pd.DataFrame([{"area": "TOTAL", "monthly": summ["monthly"].sum(), "annual": summ["annual"].sum()}])
     summ = pd.concat([summ, total], ignore_index=True)
-    return lines, summ
+    return summ
+
+
+def apply_overrides(lines, ov):
+    """Apply AI/user pricing overrides to a priced lines DataFrame and return a new copy.
+
+    ov keys (all optional):
+      global_multiplier: float          -> scales every row's monthly
+      by_model: {substr: mult}          -> scales rows whose 'model' contains substr (case-insensitive)
+      by_name:  {substr: mult}          -> scales rows whose 'name' contains substr (case-insensitive)
+      set_monthly: {substr: amount}     -> sets absolute monthly on rows whose 'name' contains substr
+    """
+    if lines is None or lines.empty or not ov:
+        return lines
+    df = lines.copy()
+    monthly = df["monthly"].astype(float)
+
+    gm = ov.get("global_multiplier")
+    if isinstance(gm, (int, float)):
+        monthly = monthly * float(gm)
+
+    for substr, mult in (ov.get("by_model") or {}).items():
+        if isinstance(mult, (int, float)):
+            mask = df["model"].astype(str).str.contains(str(substr), case=False, regex=False)
+            monthly = monthly.where(~mask, monthly * float(mult))
+
+    for substr, mult in (ov.get("by_name") or {}).items():
+        if isinstance(mult, (int, float)):
+            mask = df["name"].astype(str).str.contains(str(substr), case=False, regex=False)
+            monthly = monthly.where(~mask, monthly * float(mult))
+
+    for substr, amount in (ov.get("set_monthly") or {}).items():
+        if isinstance(amount, (int, float)):
+            mask = df["name"].astype(str).str.contains(str(substr), case=False, regex=False)
+            monthly = monthly.where(~mask, float(amount))
+
+    df["monthly"] = monthly
+    return df
 
 
 # ---------------------------------------------------------------- modernization compare
