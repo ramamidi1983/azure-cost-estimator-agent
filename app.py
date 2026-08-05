@@ -253,8 +253,7 @@ for the same app workloads before you commit to a target.
     use_sample = st.button("Use sample inventory")
 
     if up is not None:
-        new_df = pd.read_excel(up) if up.name.lower().endswith(("xlsx", "xls")) else pd.read_csv(up)
-        st.session_state["inventory"] = new_df
+        st.session_state["inventory"] = E.read_inventory(up, up.name)
         st.session_state["results"] = None
         st.rerun()
     elif use_sample:

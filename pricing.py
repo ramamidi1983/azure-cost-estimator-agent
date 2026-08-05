@@ -6,7 +6,8 @@ Docs: https://learn.microsoft.com/rest/api/cost-management/retail-prices/azure-r
 import json, os, time, urllib.parse, urllib.request
 
 API = "https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&$filter="
-CACHE_DIR = os.path.join(os.path.dirname(__file__), ".cache")
+# Cache dir is configurable so it can point at a mounted (shared, persistent) volume.
+CACHE_DIR = os.environ.get("PRICE_CACHE_DIR") or os.path.join(os.path.dirname(__file__), ".cache")
 CACHE_TTL = 60 * 60 * 24  # 24h
 
 

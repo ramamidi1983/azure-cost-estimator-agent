@@ -9,9 +9,7 @@ TERM_LABEL = {"payg": "Pay-as-you-go", "1y": "1-Year Savings Plan/Reserved",
 
 
 def load(path):
-    if path.lower().endswith((".xlsx", ".xls")):
-        return pd.read_excel(path)
-    return pd.read_csv(path)
+    return E.read_inventory(path)
 
 
 def run(path, region="eastus", term="1y", ahb=False, resiliency=False, out=None):

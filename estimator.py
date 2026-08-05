@@ -16,6 +16,8 @@ Inventory columns (CSV/XLSX, case-insensitive):
   azure_sku(optional), unit_price(SaaS $/user/mo)
 """
 import os
+import concurrent.futures as _cf
+import re
 import pandas as pd
 import yaml
 import pricing as P
@@ -24,6 +26,143 @@ CFG = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "config", "sku
 HOURS = P.HOURS_PER_MONTH
 TF = CFG["term_factors"]
 PDB = CFG["paas_db"]
+
+
+# ---------------------------------------------------------------- inventory normalization
+# Canonical schema -> the many header variants users bring in different inventory formats.
+# Order matters: earlier canonicals claim a source column first.
+_COLUMN_ALIASES = [
+    ("name", ["name", "host name", "hostname", "host", "server", "server name", "servername",
+              "vm name", "vmname", "machine", "machine name", "computer", "computer name",
+              "node", "node name", "instance name", "workload name", "resource name"]),
+    ("environment", ["environment", "env", "stage", "prod nonprod", "prod non prod", "tier env"]),
+    ("role", ["role", "server type", "server role", "workload", "workload type", "app role",
+              "function", "component", "server function"]),
+    ("disposition", ["disposition", "migration disposition", "migration strategy",
+                     "migration r", "strategy", "6r", "7r", "6 r", "7 r", "recommendation",
+                     "migration recommendation", "rec", "target disposition"]),
+    ("target", ["target", "azure target", "target service", "azure service", "target platform"]),
+    ("vcpu", ["vcpu", "vcpus", "v cpu", "cpu", "cpus", "cores", "core", "vcpu count",
+              "cpu cores", "processors", "logical processors", "num cpu", "cpu count"]),
+    ("memory_gb", ["memory_gb", "memory gb", "memory gib", "ram gb", "mem gb", "memory mb",
+                   "memory mib", "ram mb", "memory", "ram", "mem", "memory ram"]),
+    ("os", ["os", "operating system", "os type", "platform", "guest os", "os name"]),
+    ("storage_gb", ["storage_gb", "storage gb", "storage gib", "disk gb", "disk gib",
+                    "total disk capacity mib", "total disk capacity mb", "total disk capacity gb",
+                    "total disk", "disk capacity", "disk", "storage", "provisioned storage",
+                    "used storage", "capacity", "total storage"]),
+    ("quantity", ["quantity", "qty", "count", "instances", "instance count", "nodes",
+                  "node count", "number", "num", "servers"]),
+    ("hours", ["hours", "runtime hours", "monthly hours", "hours per month", "active hours"]),
+    ("azure_sku", ["azure_sku", "azure sku", "sku", "vm size", "vm sku", "instance type",
+                   "target sku", "recommended sku"]),
+    ("unit_price", ["unit_price", "unit price", "license price", "price per user",
+                    "per user price", "list price"]),
+]
+
+_NUMERIC_FILL = {"vcpu": 0.0, "memory_gb": 0.0, "storage_gb": 0.0, "unit_price": 0.0}
+
+
+def _norm_key(s):
+    return re.sub(r"[^a-z0-9]+", " ", str(s).strip().lower()).strip()
+
+
+def normalize_inventory(df):
+    """Map an arbitrarily-formatted inventory to the canonical schema so uploads in
+    different formats 'just work'. Aliases common headers (Host Name->name, CPU->vcpu,
+    Memory->memory_gb, Migration Disposition->disposition, Total Disk Capacity MiB->
+    storage_gb, ...), coerces numerics, and converts memory/disk units to GB.
+    Idempotent: already-canonical columns are left as-is. Unmapped columns are kept."""
+    if df is None or getattr(df, "empty", True):
+        return df
+    df = df.copy()
+    norm_to_orig = {}
+    for c in df.columns:
+        norm_to_orig.setdefault(_norm_key(c), c)  # first occurrence wins
+    rename, used, unit_source = {}, set(), {}
+    for canon, keys in _COLUMN_ALIASES:
+        for k in keys:
+            src = norm_to_orig.get(k)
+            if src is not None and src not in used:
+                rename[src] = canon
+                used.add(src)
+                unit_source[canon] = str(src)
+                break
+    df = df.rename(columns=rename)
+
+    def _num(col):
+        return pd.to_numeric(df[col].astype(str).str.replace(",", "", regex=False)
+                             .str.extract(r"(-?\d+\.?\d*)", expand=False), errors="coerce")
+
+    for col, fill in _NUMERIC_FILL.items():
+        if col in df.columns:
+            df[col] = _num(col).fillna(fill)
+    if "hours" in df.columns:
+        df["hours"] = _num("hours").fillna(HOURS).replace(0, HOURS)
+    if "quantity" in df.columns:
+        df["quantity"] = _num("quantity").fillna(1).replace(0, 1)
+
+    # Unit conversion for memory/disk based on the original header's unit token.
+    for col in ("memory_gb", "storage_gb"):
+        if col not in df.columns:
+            continue
+        tokens = _norm_key(unit_source.get(col, col)).split()
+        factor = None
+        if "mib" in tokens or "mb" in tokens:
+            factor = 1 / 1024.0
+        elif "tib" in tokens or "tb" in tokens:
+            factor = 1024.0
+        elif "kib" in tokens or "kb" in tokens:
+            factor = 1 / (1024.0 * 1024.0)
+        if factor:
+            df[col] = df[col] * factor
+
+    # Heuristic: memory with no explicit unit but implausibly large values is really MB.
+    if "memory_gb" in df.columns:
+        tokens = _norm_key(unit_source.get("memory_gb", "memory_gb")).split()
+        has_unit = any(t in tokens for t in ("mib", "mb", "gib", "gb", "tib", "tb", "kib", "kb"))
+        if not has_unit:
+            nz = df["memory_gb"][df["memory_gb"] > 0]
+            if len(nz) and nz.median() > 1024:
+                df["memory_gb"] = df["memory_gb"] / 1024.0
+    return df
+
+
+_KEY_CANON = {"name", "vcpu", "memory_gb", "disposition", "os", "environment", "storage_gb",
+              "role", "target", "azure_sku", "quantity"}
+
+
+def _inventory_score(df):
+    """How 'inventory-like' is this DataFrame? = count of recognized canonical columns."""
+    if df is None or getattr(df, "empty", True):
+        return -1
+    try:
+        cols = set(normalize_inventory(df.head(20)).columns)
+    except Exception:
+        return -1
+    return len(_KEY_CANON & cols)
+
+
+def read_inventory(source, filename=None):
+    """Load an inventory from a path or file-like (CSV/XLSX) into the canonical schema.
+    For multi-sheet workbooks, auto-picks the sheet that looks most like an inventory
+    so users can upload workbooks where the data isn't on the first sheet."""
+    name = (filename or getattr(source, "name", "") or str(source)).lower()
+    if name.endswith((".xlsx", ".xls")):
+        xl = pd.ExcelFile(source)
+        best, best_score = None, -1
+        for sheet in xl.sheet_names:
+            try:
+                d = xl.parse(sheet)
+            except Exception:
+                continue
+            sc = _inventory_score(d)
+            if sc > best_score:
+                best, best_score = d, sc
+        df = best if best is not None else pd.read_excel(source)
+    else:
+        df = pd.read_csv(source)
+    return normalize_inventory(df)
 
 
 # ---------------------------------------------------------------- helpers
@@ -223,9 +362,73 @@ def apply_row_edits(df, row_edits):
     return out
 
 
+# ---------------------------------------------------------------- parallel prefetch
+def _prefetch_prices(df, region, term, ahb, max_workers=8):
+    """Warm the on-disk price cache concurrently.
+
+    The estimate loop calls the Azure Retail Prices API once per unique SKU/service,
+    but serially. On a cold cache that is the dominant cost (~1.5s/query). Here we
+    resolve every row to the exact pricing call(s) it will make, dedupe, and fetch
+    them in parallel so the subsequent loop hits a warm cache. Best-effort: any
+    failure is ignored (the real loop will surface genuine pricing errors)."""
+    tasks = {}  # dedupe-key -> zero-arg callable
+
+    def add(key, fn):
+        if key not in tasks:
+            tasks[key] = fn
+
+    for _, r in df.iterrows():
+        role = str(r.get("role", "") or "")
+        name = str(r.get("name", "") or "")
+        disp = str(r.get("disposition", "") or "")
+        if disp.lower() in ("nan", "none"):
+            disp = ""
+        override = str(r.get("target", "") or "").strip()
+        if override.lower() in ("nan", "none", ""):
+            override = ""
+        vcpu = float(r.get("vcpu", 0) or 0)
+        mem = float(r.get("memory_gb", 0) or 0)
+        sku_hint = str(r.get("azure_sku", "") or "").strip()
+        if sku_hint.lower() in ("nan", "none"):
+            sku_hint = ""
+        target, _ = resolve_target(disp, role, name, override)
+
+        if target == "vm":
+            sku = sku_hint or _pick(CFG["vm_catalog"], vcpu, mem)["sku"]
+            add(("vm", sku, region), lambda s=sku: P.vm_price(s, region, "linux"))
+        elif target == "aks":
+            sku = sku_hint or _pick(CFG["vm_catalog"], vcpu, mem)["sku"]
+            add(("vm", sku, region), lambda s=sku: P.vm_price(s, region, "linux"))
+            add(("aksfee", region), lambda: P.aks_cluster_fee(region))
+        elif target == "appservice":
+            sku = sku_hint or _pick(CFG["appservice_catalog"], vcpu, mem)["sku"]
+            add(("appsvc", sku, region), lambda s=sku: P.appservice_price(s, region))
+        elif target == "redis":
+            rc = _pick(CFG["redis_catalog"], 0, mem, key_v="mem", key_m="mem")
+            add(("redis", rc["sku"], region), lambda rr=rc: P.redis_price(rr["sku"], region, rr["tier"]))
+        elif target == "aca":
+            add(("aca", region), lambda: P.aca_rates(region))
+        elif target == "hyperscale":
+            add(("hs", region), lambda: P.hyperscale_rates(region))
+        elif target == "sqldb":
+            add(("sqldb", region), lambda: P.sqldb_gp_reserved(region))
+        # postgres/mysql/cosmos/saas/skip -> no live API call
+
+    if not tasks:
+        return
+    with _cf.ThreadPoolExecutor(max_workers=min(max_workers, len(tasks))) as ex:
+        futs = [ex.submit(fn) for fn in tasks.values()]
+        for f in _cf.as_completed(futs):
+            try:
+                f.result()
+            except Exception:
+                pass  # best-effort warming; real loop re-raises genuine errors
+
+
 # ---------------------------------------------------------------- main estimate
 def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False):
-    df = df.rename(columns={c: c.strip().lower() for c in df.columns})
+    df = normalize_inventory(df)
+    _prefetch_prices(df, region, term, ahb)
     rows = []
     for _, r in df.iterrows():
         name = str(r.get("name", "unnamed"))
@@ -355,7 +558,7 @@ def apply_overrides(lines, ov):
 # ---------------------------------------------------------------- modernization compare
 def modernization(df, region="eastus", term="1y", ahb=False):
     """For each APP-type workload, compare cost across modernization paths."""
-    df = df.rename(columns={c: c.strip().lower() for c in df.columns})
+    df = normalize_inventory(df)
     out = []
     for _, r in df.iterrows():
         name = str(r.get("name", "unnamed"))
