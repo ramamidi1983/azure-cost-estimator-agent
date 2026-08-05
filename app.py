@@ -23,6 +23,7 @@ with st.sidebar:
     term = st.radio("Pricing term", ["1y", "3y", "payg"],
                     format_func=lambda t: TERM_LABEL[t], index=0)
     ahb = st.checkbox("Azure Hybrid Benefit (Windows/SQL)", value=False)
+    default_os = st.selectbox("Default OS (for rows with no OS in file)", ["Linux", "Windows"], index=0)
     resiliency = st.checkbox("Resiliency add-in (HA replica + ASR)", value=True)
     st.divider()
     st.markdown("**Inventory columns**")
@@ -90,8 +91,10 @@ if df is not None:
 
     if st.button("Estimate cost", type="primary"):
         with st.spinner("Fetching live Azure pricing and computing..."):
-            lines, summ = E.estimate(edited, region=region, term=term, ahb=ahb, resiliency=resiliency)
-            modern = E.modernization(edited, region=region, term=term, ahb=ahb)
+            lines, summ = E.estimate(edited, region=region, term=term, ahb=ahb, resiliency=resiliency,
+                                      default_os=default_os.lower())
+            modern = E.modernization(edited, region=region, term=term, ahb=ahb,
+                                     default_os=default_os.lower())
         total = summ[summ["area"] == "TOTAL"].iloc[0]
 
         c1, c2, c3 = st.columns(3)

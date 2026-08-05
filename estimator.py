@@ -31,7 +31,7 @@ TF = CFG["term_factors"]
 # source column first. Lets users upload inventories in many different formats.
 _COLUMN_ALIASES = [
     ("name", ["name", "host name", "hostname", "server name", "servername", "server",
-              "vm name", "machine name", "host", "node name", "computer name"]),
+              "vm name", "vm", "machine name", "host", "node name", "computer name"]),
     ("environment", ["environment", "env", "tier", "stage"]),
     ("role", ["role", "server type", "workload type", "workload", "type", "function",
               "application", "app", "app name", "component"]),
@@ -41,17 +41,34 @@ _COLUMN_ALIASES = [
     ("vcpu", ["vcpu", "vcpus", "cpu", "cpus", "cores", "core", "processors",
               "req vcpu", "vcpu count", "num cpu", "cpu count", "logical processors"]),
     ("memory_gb", ["memory gb", "memory", "ram", "ram gb", "mem", "memory gib",
-                   "ram gib", "memory mb", "memory mib", "ram mb", "ram mib"]),
-    ("os", ["os", "operating system", "platform", "os type", "guest os"]),
-    ("storage_gb", ["storage gb", "storage", "disk", "disk gb", "disk capacity",
-                    "total disk capacity mib", "total disk capacity", "total disk",
-                    "storage gib", "used storage gb", "provisioned storage gb", "disk mib"]),
+                   "ram gib", "memory mb", "memory mib", "ram mb", "ram mib", "memory mb "]),
+    ("os", ["os", "os according to the configuration file",
+            "os according to the vmware tools", "operating system", "platform",
+            "os type", "guest os", "guest os full name"]),
+    ("storage_gb", ["storage gb", "provisioned mib", "provisioned", "storage", "disk",
+                    "disk gb", "disk capacity", "total disk capacity mib",
+                    "total disk capacity", "total disk", "storage gib",
+                    "used storage gb", "provisioned storage gb", "disk mib", "in use mib"]),
     ("quantity", ["quantity", "qty", "count", "instances", "instance count", "nodes", "node count"]),
     ("hours", ["hours", "hours mo", "hours month", "monthly hours", "run hours"]),
     ("azure_sku", ["azure sku", "sku", "vm sku", "instance type", "azure type", "vm size", "size"]),
     ("unit_price", ["unit price", "license cost", "price per user", "unit cost", "list price"]),
 ]
 _NUMERIC = ["vcpu", "memory_gb", "storage_gb", "quantity", "hours", "unit_price"]
+
+
+def _resolve_os(value, default_os="linux"):
+    """Normalize a free-text OS value to 'windows' or 'linux'.
+    Falls back to default_os when the field is blank/missing."""
+    s = str(value or "").strip().lower()
+    if s in ("", "nan", "none"):
+        return default_os
+    if "win" in s:
+        return "windows"
+    if any(t in s for t in ("linux", "rhel", "red hat", "ubuntu", "centos", "suse",
+                            "debian", "oracle linux", "rocky", "alma", "amazon linux")):
+        return "linux"
+    return default_os
 
 
 def _norm_key(s):
@@ -269,7 +286,7 @@ def cost_saas(users, unit_price):
 
 
 # ---------------------------------------------------------------- main estimate
-def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False):
+def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, default_os="linux"):
     df = _normalize_columns(df)
     rows = []
     for _, r in df.iterrows():
@@ -285,7 +302,7 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False):
         qty = int(float(r.get("quantity", 1) or 1))
         vcpu = float(r.get("vcpu", 0) or 0)
         mem = float(r.get("memory_gb", 0) or 0)
-        os_type = str(r.get("os", "linux") or "linux").lower()
+        os_type = _resolve_os(r.get("os"), default_os)
         storage = float(r.get("storage_gb", 0) or 0)
         hours = float(r.get("hours", HOURS) or HOURS)
         sku_hint = str(r.get("azure_sku", "") or "").strip()
@@ -352,7 +369,7 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False):
 
 
 # ---------------------------------------------------------------- modernization compare
-def modernization(df, region="eastus", term="1y", ahb=False):
+def modernization(df, region="eastus", term="1y", ahb=False, default_os="linux"):
     """For each APP-type workload, compare cost across modernization paths."""
     df = _normalize_columns(df)
     out = []
@@ -366,7 +383,7 @@ def modernization(df, region="eastus", term="1y", ahb=False):
         if _role_cat(role, name) != "app":
             continue
         vcpu = float(r.get("vcpu", 0) or 0); mem = float(r.get("memory_gb", 0) or 0)
-        os_type = str(r.get("os", "linux") or "linux").lower()
+        os_type = _resolve_os(r.get("os"), default_os)
         hours = float(r.get("hours", HOURS) or HOURS)
         qty = int(float(r.get("quantity", 1) or 1))
         out.append({
