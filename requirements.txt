@@ -1,4 +1,5 @@
 streamlit>=1.30
+starlette<1.3
 pandas>=2.0
 openpyxl>=3.1
 requests>=2.31
