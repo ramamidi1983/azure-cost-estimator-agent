@@ -91,6 +91,9 @@ updates the Container App to the new image. Config is passed via GitHub Actions
 | `Dockerfile` / `.dockerignore` | Container image for the dashboard |
 | `infra/main.bicep` | Log Analytics + ACA env + managed identity (AcrPull) + Container App |
 | `deploy/provision.ps1` | One-shot: RG + ACR + image build + Bicep deploy + GitHub OIDC/CI wiring |
+| `deploy/enable-entra-auth.ps1` | Turn on Microsoft Entra ID (Easy Auth) sign-in on the public app |
+| `deploy/make-private.ps1` | Optional: recreate the env internal-only (VNet) + Bastion + jump VM |
+| `deploy/cleanup-private.ps1` | Tear down the private-networking resources to stop their cost |
 | `.github/workflows/deploy.yml` | Build → push → deploy on every `main` push (OIDC, no secrets) |
 
 **Quick manual alternative** (no CI/CD):
@@ -101,7 +104,47 @@ az containerapp up --name cost-estimator --resource-group rg-cost-estimator `
 
 > Add **Entra ID (Easy Auth)** on the Container App to require sign-in. The Retail Prices API is public (no key), so no app secrets are required.
 
+## Public hosting with Entra ID sign-in (recommended)
+
+The simplest secure setup — and the one currently deployed — is a **public** Container Apps
+environment with **Microsoft Entra ID (Easy Auth)** in front of it. It's reachable from any
+browser on the public internet, but every visitor must sign in with a Microsoft account in
+your tenant.
+
+```powershell
+# 1) Public env + app (external ingress) already created by provision.ps1, then:
+# 2) Turn on Entra sign-in (creates the app registration + wires Easy Auth):
+./deploy/enable-entra-auth.ps1 -ResourceGroup rg-cost-estimator -AppName cost-estimator-pub
+```
+
+- Unauthenticated browser requests are **redirected to the Microsoft sign-in page**.
+- Sign-in is restricted to your tenant (`AzureADMyOrg`).
+- No app secrets in code — the client secret lives in the Container App's secret store.
+
+**Optional IP allowlist** (layer on top of, or instead of, Entra auth):
+```powershell
+az containerapp ingress access-restriction set -g rg-cost-estimator -n cost-estimator-pub `
+  --rule-name allow-my-ip --ip-address <your.public.ip>/32 --action Allow
+# One Allow rule => everything else is implicitly denied. Remove it to reopen:
+az containerapp ingress access-restriction remove -g rg-cost-estimator -n cost-estimator-pub --rule-name allow-my-ip
+```
+
+### Stop / start to save cost (scale-to-zero)
+```powershell
+# Stop: no replicas run when idle (~$0 compute); auto-starts on next request
+az containerapp update -g rg-cost-estimator -n cost-estimator-pub --min-replicas 0 --max-replicas 3
+# Warm/always-on: keep one replica ready (no cold start)
+az containerapp update -g rg-cost-estimator -n cost-estimator-pub --min-replicas 1
+```
+
 ## Private (internal) hosting — access via Azure Bastion
+
+> **Heads-up:** Internal (VNet-only) Container Apps ingress can hit an Azure **platform bug**
+> where the internal load balancer returns `404 "Azure Container App - Unavailable"` for
+> healthy apps (envoy has no route), even with correct DNS, ports, and no NSG/UDR. If you hit
+> this, prefer **public hosting with Entra ID sign-in** (above) — optionally with an IP
+> allowlist — which is reliable. Use `deploy/cleanup-private.ps1` to tear down the private
+> resources below.
 
 For sensitive workloads you can host the dashboard **privately** (no public internet exposure).
 A Container Apps environment's internal/external mode is **immutable**, so this recreates the
@@ -128,8 +171,9 @@ The FQDN resolves **only inside the VNet** (via the private DNS zone), so it is 
 from the public internet. `-internal` support is built into `infra/main.bicep`
 (`internal` + `infrastructureSubnetId` params).
 
-> **Cost note:** Azure Bastion Basic ≈ $140/mo and the jump VM add ongoing cost. To pause spend,
-> delete `bastion-cost` + `pip-bastion` and deallocate `vm-jump` when not in use.
+> **Cost note:** Azure Bastion Basic ≈ $140/mo and the jump VM add ongoing cost. To remove
+> all of it, run `./deploy/cleanup-private.ps1 -ResourceGroup rg-cost-estimator` (deletes the
+> internal env/app, Bastion, jump VM, VNet, and private DNS zone; keeps ACR + the public app).
 
 ## Roadmap / making it more "agentic"
 - **LLM-assisted sizing** (optional): add an Azure OpenAI step that reads a messy inventory or an RFP PDF and proposes `target`/`vcpu`/`memory_gb` before pricing. Keep it human-in-the-loop.
