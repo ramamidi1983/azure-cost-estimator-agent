@@ -11,18 +11,18 @@ Built from the pricing + workbook pipeline proven on the RFP-Carnival and Goodye
    - **If no disposition and no target are given, the row defaults to standard IaaS (a VM).**
 3. **Price** via the Azure Retail Prices API (cached 24h) for the chosen region/term.
 4. **Apply** toggles: term (PAYG / 1yr / 3yr), Azure Hybrid Benefit, resiliency add-in, prod vs non-prod.
-5. **Produce** a Summary + Line_Items + **Modernization** + Rates_Meta Excel workbook, plus interactive charts and a **modernization comparison** (Rehost vs Replatform vs Containerize vs Modernize) in the dashboard.
+5. **Produce** a client-ready Excel workbook — **Summary** (cost-area roll-up), **Host_Detail** (one row per server with full sizing + pricing), **per-area sheets** (Goodyear-style component breakdowns with subtotals), **Modernization**, and **Assumptions** — plus interactive charts and a **modernization comparison** (Rehost vs Replatform vs Containerize vs Modernize) in the dashboard.
 6. **Chat** with a built-in **AI assistant** (Azure OpenAI) to tweak assumptions and pricing in plain English, and **customize prices** manually — see below.
 
 ## AI assistant & custom pricing (dashboard)
-The dashboard has two interactive tabs on top of the estimate:
+The dashboard opens on a top-level **AI assistant** tab (usable *before* you load any inventory) alongside a **Cost estimator** tab:
 
-- **AI assistant** — type requests in plain English and the estimate updates live. Examples:
+- **AI assistant** (top-level tab, always available) — type requests in plain English and the estimate updates live. Examples:
   *"switch to a 3-year term and turn on hybrid benefit"*, *"apply a 15% partner discount"*,
   *"add a 10% contingency buffer"*, *"set the web-frontend rows to 5 instances"*,
   *"bump every SQL line by 20%"*, *"price prod-sql01 at $1,200/month"*.
-  The model returns structured changes (parameter toggles, per-row edits, and pricing multipliers/absolute prices) that are validated and applied. If no AI endpoint is configured it falls back to a deterministic rule-based parser so the chat still works offline.
-- **Custom pricing** — a global adjustment slider (discount/uplift) plus an editable per-line monthly table to pin absolute prices. Active overrides are shown in the sidebar and can be reset.
+  The model returns structured changes (parameter toggles, per-row edits, and pricing multipliers/absolute prices) that are validated and applied. Parameter/pricing preferences set here are remembered and applied automatically once an inventory is loaded (per-server edits need an inventory). If no AI endpoint is configured it falls back to a deterministic rule-based parser so the chat still works offline.
+- **Custom pricing** (sub-tab of the estimator) — a global adjustment slider (discount/uplift) plus an editable per-line monthly table to pin absolute prices. Active overrides are shown in the sidebar and can be reset.
 
 **Wiring up Azure OpenAI** (via environment variables — the app uses **Entra ID / managed-identity auth** by default; no API key needed when the account has `disableLocalAuth=true`):
 ```
@@ -61,7 +61,7 @@ streamlit run app.py
 | `pricing.py` | Azure Retail Prices API client (VM, Hyperscale, Container Apps, AKS, App Service, SQL DB, Redis, Blob) + disk cache |
 | `estimator.py` | Inventory → disposition-driven target → costed line items + summary + modernization compare; plus `apply_overrides`/`apply_row_edits`/`build_summary` for AI/manual customization |
 | `assistant.py` | AI assistant: turns natural-language requests into validated structured changes (Azure OpenAI via Entra ID, with rule-based fallback) |
-| `workbook.py` | Formatted Excel generator (Summary / Line_Items / Modernization / Rates_Meta) |
+| `workbook.py` | Formatted Excel generator: **Summary**, **Host_Detail** (per-server), **per-area** sheets (Goodyear-style, with subtotals), **Modernization**, **Assumptions** |
 | `cli.py` | Command-line entry point |
 | `app.py` | Streamlit dashboard: inventory editor, IaaS/PaaS/SaaS pricing instructions, **AI assistant** + **Custom pricing** tabs |
 | `config/skus.yaml` | Disposition map, VM/App Service/Redis catalogs, PaaS DB rates + add-on rates |

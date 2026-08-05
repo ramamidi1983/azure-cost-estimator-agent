@@ -250,7 +250,8 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False):
 
         target, disp_used = resolve_target(disp, role, name, override)
         base = {"name": name, "environment": env, "role": role, "disposition": disp or "(none->IaaS)",
-                "target": target, "quantity": qty, "region": region}
+                "target": target, "quantity": qty, "region": region,
+                "os": os_type, "vcpu": vcpu, "memory_gb": mem, "storage_gb": storage}
         if target == "skip":
             continue
 

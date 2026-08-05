@@ -100,7 +100,8 @@ def build_context():
     ss = st.session_state
     ctx = {"params": {"region": ss.p_region, "term": ss.p_term,
                       "ahb": ss.p_ahb, "resiliency": ss.p_resiliency},
-           "active_overrides": ss.get("overrides") or {}}
+           "active_overrides": ss.get("overrides") or {},
+           "inventory_loaded": ss.get("inventory") is not None}
     r = ss.get("results")
     if r and r.get("lines") is not None and not r["lines"].empty:
         lines = r["lines"]
@@ -112,11 +113,27 @@ def build_context():
     return ctx
 
 
+def apply_ai_result(result):
+    """Apply a parsed assistant result to session state. Returns a status note or ''."""
+    ss = st.session_state
+    notes = []
+    if result.get("row_edits"):
+        if ss.get("inventory") is not None:
+            ss["inventory"] = E.apply_row_edits(ss["inventory"], result["row_edits"])
+        else:
+            notes.append("Per-server edits will apply once you load an inventory in the Cost estimator tab.")
+    if result.get("pricing"):
+        ss["overrides"] = merge_overrides(ss["overrides"], result["pricing"])
+    if result.get("params"):
+        ss["pending_params"] = result["params"]
+    return " ".join(notes)
+
+
 # ---------------------------------------------------------------- header
 st.title("Azure Migration Cost Estimator")
-st.caption("Upload a workload inventory - get a client-ready Azure cost estimate priced with live Azure Retail rates. "
-           "Chat with the built-in AI assistant to tweak assumptions and pricing in plain English. "
-           "Supports IaaS, PaaS, containers, SaaS and modernization comparisons.")
+st.caption("Chat with the built-in AI assistant to shape assumptions and pricing in plain English, "
+           "or upload a workload inventory for a client-ready Azure cost estimate priced with live Azure "
+           "Retail rates. Supports IaaS, PaaS, containers, SaaS and modernization comparisons.")
 
 with st.sidebar:
     st.header("Parameters")
@@ -139,9 +156,57 @@ with st.sidebar:
             "storage_gb, quantity, hours, azure_sku,\nunit_price", language="text")
     st.markdown("Leave `disposition` and `target` blank to default to **standard IaaS (VM)**.")
 
-# ---------------------------------------------------------------- Instructions
-with st.expander("How pricing works - IaaS / PaaS / SaaS / combination (read me)", expanded=False):
-    st.markdown("""
+# recompute up front so both tabs see fresh results
+ensure_results()
+
+tab_ai, tab_est = st.tabs(["\U0001F4AC AI assistant", "\U0001F4CA Cost estimator"])
+
+# ================================================================ AI ASSISTANT
+with tab_ai:
+    st.subheader("Chat: shape the estimate in plain English")
+    st.caption("Engine: " + A.engine_name())
+    if st.session_state.get("inventory") is None:
+        st.info("You can chat here any time. Parameter and pricing preferences you set are remembered and "
+                "applied automatically once you load an inventory in the **Cost estimator** tab. "
+                "Per-server edits (e.g. changing a specific host's size) need an inventory loaded.")
+    st.markdown(
+        "Try: *\"switch to a 3-year term and turn on hybrid benefit\"*, "
+        "*\"apply a 15% partner discount\"*, *\"add a 10% contingency buffer\"*, "
+        "*\"use region westeurope\"*, *\"set the web-frontend rows to 5 instances\"*, "
+        "*\"bump every SQL line by 20%\"*, or *\"price prod-sql01 at $1,200/month\"*.")
+
+    for m in st.session_state["chat"]:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    with st.form("ai_form", clear_on_submit=True):
+        prompt = st.text_area("Your request", height=90,
+                              placeholder="e.g. apply a 15% discount and use a 3 year term")
+        col_a, col_b = st.columns([1, 6])
+        sent = col_a.form_submit_button("Send", type="primary")
+        clear = col_b.form_submit_button("Clear chat")
+
+    if clear:
+        st.session_state["chat"] = []
+        st.rerun()
+
+    if sent and prompt and prompt.strip():
+        st.session_state["chat"].append({"role": "user", "content": prompt.strip()})
+        with st.spinner("Thinking..."):
+            result = A.interpret(prompt.strip(), build_context())
+        note = apply_ai_result(result)
+        engine = result.get("_engine", "")
+        reply = result.get("reply", "Done.")
+        if note:
+            reply = f"{reply}\n\n> {note}"
+        st.session_state["chat"].append(
+            {"role": "assistant", "content": f"{reply}\n\n*(engine: {engine})*"})
+        st.rerun()
+
+# ================================================================ COST ESTIMATOR
+with tab_est:
+    with st.expander("How pricing works - IaaS / PaaS / SaaS / combination (read me)", expanded=False):
+        st.markdown("""
 This agent selects an Azure target for each workload from its **migration disposition** (the "7 R's"),
 then prices it with **live Azure Retail Prices**. If a row has no disposition and no explicit target,
 it is priced as **standard IaaS (a VM)**.
@@ -184,173 +249,124 @@ Use the **Modernization** tab to compare Rehost vs Replatform vs Containerize vs
 for the same app workloads before you commit to a target.
 """)
 
-# ---------------------------------------------------------------- load inventory
-up = st.file_uploader("Upload inventory (CSV or XLSX)", type=["csv", "xlsx", "xls"])
-c_load1, c_load2 = st.columns([1, 4])
-use_sample = c_load1.button("Use sample inventory")
+    up = st.file_uploader("Upload inventory (CSV or XLSX)", type=["csv", "xlsx", "xls"])
+    use_sample = st.button("Use sample inventory")
 
-if up is not None:
-    new_df = pd.read_excel(up) if up.name.lower().endswith(("xlsx", "xls")) else pd.read_csv(up)
-    st.session_state["inventory"] = new_df
-    st.session_state["results"] = None
-elif use_sample:
-    st.session_state["inventory"] = pd.read_csv("samples/sample_inventory.csv")
-    st.session_state["results"] = None
+    if up is not None:
+        new_df = pd.read_excel(up) if up.name.lower().endswith(("xlsx", "xls")) else pd.read_csv(up)
+        st.session_state["inventory"] = new_df
+        st.session_state["results"] = None
+        st.rerun()
+    elif use_sample:
+        st.session_state["inventory"] = pd.read_csv("samples/sample_inventory.csv")
+        st.session_state["results"] = None
+        st.rerun()
 
-if st.session_state.get("inventory") is None:
-    st.info("Upload an inventory file or click **Use sample inventory** to begin.")
-    st.stop()
-
-st.subheader("Inventory")
-edited = st.data_editor(st.session_state["inventory"], num_rows="dynamic",
-                        use_container_width=True, key="inv_editor")
-if st.button("Apply inventory changes", type="primary"):
-    st.session_state["inventory"] = edited
-    st.rerun()
-
-# recompute if anything changed
-ensure_results()
-res = st.session_state.get("results")
-if not res:
-    st.stop()
-
-lines, summ, modern = res["lines"], res["summ"], res["modern"]
-total = summ[summ["area"] == "TOTAL"].iloc[0]
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Monthly", f"${total['monthly']:,.0f}")
-c2.metric("Annual", f"${total['annual']:,.0f}")
-c3.metric("3-Year", f"${total['annual']*3:,.0f}")
-
-tab_sum, tab_lines, tab_mod, tab_ai, tab_price = st.tabs(
-    ["Summary", "Line items", "Modernization", "AI assistant", "Custom pricing"])
-
-with tab_sum:
-    st.subheader("Summary by area")
-    show = summ[summ["area"] != "TOTAL"].set_index("area")
-    st.bar_chart(show["monthly"])
-    st.dataframe(summ.style.format({"monthly": "${:,.0f}", "annual": "${:,.0f}"}),
-                 use_container_width=True)
-
-with tab_lines:
-    st.subheader("Line items (disposition -> target -> model)")
-    cols = [c for c in ["name", "environment", "role", "disposition", "target", "model",
-                        "sku", "rate_basis", "quantity", "hours", "storage_gb", "monthly"]
-            if c in lines.columns]
-    st.dataframe(lines[cols].style.format({"monthly": "${:,.0f}"}),
-                 use_container_width=True)
-
-with tab_mod:
-    st.subheader("Modernization path comparison")
-    st.caption("Per app workload, $/month. Compare Rehost vs Replatform vs Containerize vs Modernize.")
-    if modern is not None and not modern.empty:
-        mchart = modern[modern[modern.columns[0]] != "TOTAL"].set_index(modern.columns[0])
-        st.bar_chart(mchart)
-        fmt = {c: "${:,.0f}" for c in modern.columns if c != modern.columns[0]}
-        st.dataframe(modern.style.format(fmt), use_container_width=True)
+    if st.session_state.get("inventory") is None:
+        st.info("Upload an inventory file or click **Use sample inventory** to begin. "
+                "You can also start in the **AI assistant** tab.")
     else:
-        st.info("No app workloads to compare (modernization applies to app/web/api roles).")
-
-# ---------------------------------------------------------------- AI assistant
-with tab_ai:
-    st.subheader("Chat: customize the estimate in plain English")
-    st.caption("Engine: " + A.engine_name())
-    st.markdown(
-        "Ask for things like: *\"switch to a 3-year term and turn on hybrid benefit\"*, "
-        "*\"apply a 15% partner discount\"*, *\"add a 10% contingency buffer\"*, "
-        "*\"set the web-frontend rows to 5 instances\"*, *\"bump every SQL line by 20%\"*, "
-        "or *\"price prod-sql01 at $1,200/month\"*. Changes update the estimate live.")
-
-    for m in st.session_state["chat"]:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
-
-    with st.form("ai_form", clear_on_submit=True):
-        prompt = st.text_area("Your request", height=80,
-                              placeholder="e.g. apply a 15% discount and use a 3 year term")
-        col_a, col_b = st.columns([1, 6])
-        sent = col_a.form_submit_button("Send", type="primary")
-        clear = col_b.form_submit_button("Clear chat")
-
-    if clear:
-        st.session_state["chat"] = []
-        st.rerun()
-
-    if sent and prompt and prompt.strip():
-        st.session_state["chat"].append({"role": "user", "content": prompt.strip()})
-        with st.spinner("Thinking..."):
-            result = A.interpret(prompt.strip(), build_context())
-        # apply structured changes
-        if result.get("row_edits"):
-            st.session_state["inventory"] = E.apply_row_edits(
-                st.session_state["inventory"], result["row_edits"])
-        if result.get("pricing"):
-            st.session_state["overrides"] = merge_overrides(
-                st.session_state["overrides"], result["pricing"])
-        if result.get("params"):
-            st.session_state["pending_params"] = result["params"]
-        engine = result.get("_engine", "")
-        reply = result.get("reply", "Done.")
-        st.session_state["chat"].append(
-            {"role": "assistant", "content": f"{reply}\n\n*(engine: {engine})*"})
-        st.rerun()
-
-# ---------------------------------------------------------------- custom pricing
-with tab_price:
-    st.subheader("Manually customize pricing")
-    ov = st.session_state.get("overrides") or {}
-
-    st.markdown("**Global adjustment** - shift every line up or down (discount or uplift).")
-    cur_pct = int(round((ov.get("global_multiplier", 1.0) - 1.0) * 100))
-    pct = st.slider("Adjustment %", -60, 60, cur_pct, step=1,
-                    help="-15 = 15% discount, +10 = 10% uplift/buffer")
-    cga, cgb = st.columns([1, 6])
-    if cga.button("Apply global adjustment"):
-        new_ov = dict(ov)
-        new_ov["global_multiplier"] = round(1 + pct / 100.0, 4)
-        st.session_state["overrides"] = new_ov
-        st.rerun()
-    if cgb.button("Clear all overrides"):
-        st.session_state["overrides"] = {}
-        st.rerun()
-
-    st.divider()
-    st.markdown("**Per-line prices** - edit the monthly column to pin an absolute price, "
-                "then click *Apply manual prices*.")
-    price_df = lines[["name", "model", "monthly"]].copy()
-    price_df["monthly"] = price_df["monthly"].round(2)
-    edited_prices = st.data_editor(
-        price_df, use_container_width=True, key="price_editor",
-        disabled=["name", "model"], num_rows="fixed")
-    if st.button("Apply manual prices"):
-        set_monthly = {}
-        base = price_df.set_index("name")["monthly"]
-        for _, row in edited_prices.iterrows():
-            nm = row["name"]
-            try:
-                new_val = float(row["monthly"])
-            except (TypeError, ValueError):
-                continue
-            if nm in base.index and abs(float(base.loc[nm]) - new_val) > 0.01:
-                set_monthly[nm] = new_val
-        if set_monthly:
-            st.session_state["overrides"] = merge_overrides(
-                st.session_state["overrides"], {"set_monthly": set_monthly})
+        st.subheader("Inventory")
+        edited = st.data_editor(st.session_state["inventory"], num_rows="dynamic",
+                                use_container_width=True, key="inv_editor")
+        if st.button("Apply inventory changes", type="primary"):
+            st.session_state["inventory"] = edited
             st.rerun()
-        else:
-            st.info("No price changes detected.")
 
-# ---------------------------------------------------------------- export
-params = {"region": st.session_state.p_region, "term": st.session_state.p_term,
-          "term_label": TERM_LABEL[st.session_state.p_term],
-          "ahb": st.session_state.p_ahb, "resiliency": st.session_state.p_resiliency,
-          "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
-          "meta": E.meta(st.session_state.p_region)}
-buf = io.BytesIO()
-tmp = os.path.join(tempfile.gettempdir(), "azure_estimate.xlsx")
-W.build(lines, summ, params, tmp, modern=modern)
-with open(tmp, "rb") as f:
-    buf.write(f.read())
-st.download_button("Download Excel workbook", buf.getvalue(),
-                   file_name="Azure_Cost_Estimate.xlsx",
-                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        ensure_results()
+        res = st.session_state.get("results")
+        if res:
+            lines, summ, modern = res["lines"], res["summ"], res["modern"]
+            total = summ[summ["area"] == "TOTAL"].iloc[0]
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Monthly", f"${total['monthly']:,.0f}")
+            c2.metric("Annual", f"${total['annual']:,.0f}")
+            c3.metric("3-Year", f"${total['annual']*3:,.0f}")
+
+            t_sum, t_lines, t_mod, t_price = st.tabs(
+                ["Summary", "Line items", "Modernization", "Custom pricing"])
+
+            with t_sum:
+                st.subheader("Summary by area")
+                show = summ[summ["area"] != "TOTAL"].set_index("area")
+                st.bar_chart(show["monthly"])
+                st.dataframe(summ.style.format({"monthly": "${:,.0f}", "annual": "${:,.0f}"}),
+                             use_container_width=True)
+
+            with t_lines:
+                st.subheader("Line items (disposition -> target -> model)")
+                cols = [c for c in ["name", "environment", "role", "disposition", "target", "model",
+                                    "sku", "rate_basis", "quantity", "hours", "storage_gb", "monthly"]
+                        if c in lines.columns]
+                st.dataframe(lines[cols].style.format({"monthly": "${:,.0f}"}),
+                             use_container_width=True)
+
+            with t_mod:
+                st.subheader("Modernization path comparison")
+                st.caption("Per app workload, $/month. Compare Rehost vs Replatform vs Containerize vs Modernize.")
+                if modern is not None and not modern.empty:
+                    mchart = modern[modern[modern.columns[0]] != "TOTAL"].set_index(modern.columns[0])
+                    st.bar_chart(mchart)
+                    fmt = {c: "${:,.0f}" for c in modern.columns if c != modern.columns[0]}
+                    st.dataframe(modern.style.format(fmt), use_container_width=True)
+                else:
+                    st.info("No app workloads to compare (modernization applies to app/web/api roles).")
+
+            with t_price:
+                st.subheader("Manually customize pricing")
+                ovv = st.session_state.get("overrides") or {}
+                st.markdown("**Global adjustment** - shift every line up or down (discount or uplift).")
+                cur_pct = int(round((ovv.get("global_multiplier", 1.0) - 1.0) * 100))
+                pct = st.slider("Adjustment %", -60, 60, cur_pct, step=1,
+                                help="-15 = 15% discount, +10 = 10% uplift/buffer")
+                cga, cgb = st.columns([1, 6])
+                if cga.button("Apply global adjustment"):
+                    new_ov = dict(ovv)
+                    new_ov["global_multiplier"] = round(1 + pct / 100.0, 4)
+                    st.session_state["overrides"] = new_ov
+                    st.rerun()
+                if cgb.button("Clear all overrides"):
+                    st.session_state["overrides"] = {}
+                    st.rerun()
+
+                st.divider()
+                st.markdown("**Per-line prices** - edit the monthly column to pin an absolute price, "
+                            "then click *Apply manual prices*.")
+                price_df = lines[["name", "model", "monthly"]].copy()
+                price_df["monthly"] = price_df["monthly"].round(2)
+                edited_prices = st.data_editor(
+                    price_df, use_container_width=True, key="price_editor",
+                    disabled=["name", "model"], num_rows="fixed")
+                if st.button("Apply manual prices"):
+                    set_monthly = {}
+                    base = price_df.set_index("name")["monthly"]
+                    for _, row in edited_prices.iterrows():
+                        nm = row["name"]
+                        try:
+                            new_val = float(row["monthly"])
+                        except (TypeError, ValueError):
+                            continue
+                        if nm in base.index and abs(float(base.loc[nm]) - new_val) > 0.01:
+                            set_monthly[nm] = new_val
+                    if set_monthly:
+                        st.session_state["overrides"] = merge_overrides(
+                            st.session_state["overrides"], {"set_monthly": set_monthly})
+                        st.rerun()
+                    else:
+                        st.info("No price changes detected.")
+
+            # export
+            params = {"region": st.session_state.p_region, "term": st.session_state.p_term,
+                      "term_label": TERM_LABEL[st.session_state.p_term],
+                      "ahb": st.session_state.p_ahb, "resiliency": st.session_state.p_resiliency,
+                      "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                      "meta": E.meta(st.session_state.p_region)}
+            buf = io.BytesIO()
+            tmp = os.path.join(tempfile.gettempdir(), "azure_estimate.xlsx")
+            W.build(lines, summ, params, tmp, modern=modern)
+            with open(tmp, "rb") as f:
+                buf.write(f.read())
+            st.download_button("Download Excel workbook", buf.getvalue(),
+                               file_name="Azure_Cost_Estimate.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
