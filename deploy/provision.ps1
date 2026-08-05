@@ -70,14 +70,29 @@ if (-not $SkipGitHubOidc) {
   $spId = az ad sp list --filter "appId eq '$appId'" --query "[0].id" -o tsv
   if (-not $spId) { $spId = az ad sp create --id $appId --query id -o tsv }
 
-  # Federated credential: main branch
-  $fcName = 'gh-main'
-  $exists = az ad app federated-credential list --id $appId --query "[?name=='$fcName'] | length(@)" -o tsv
-  if ($exists -eq '0') {
+  # Federated credential(s): main branch.
+  # Note: personal GitHub accounts can present the OIDC subject with numeric
+  # owner/repo IDs (repo:login@ownerId/repo@repoId:ref:...). Register both forms.
+  $ownerRepo = $GitHubRepo
+  $subjects = @("repo:${ownerRepo}:ref:refs/heads/main")
+  try {
+    $owner = $ownerRepo.Split('/')[0]
+    $ownerId = gh api "users/$owner" --jq .id 2>$null
+    $repoId  = gh api "repos/$ownerRepo" --jq .id 2>$null
+    if ($ownerId -and $repoId) {
+      $subjects += "repo:$owner@$ownerId/$($ownerRepo.Split('/')[1])@${repoId}:ref:refs/heads/main"
+    }
+  } catch { }
+
+  $existingSubs = az ad app federated-credential list --id $appId --query "[].subject" -o tsv
+  $idx = 0
+  foreach ($subj in $subjects) {
+    $idx++
+    if ($existingSubs -contains $subj) { continue }
     $fc = @{
-      name      = $fcName
+      name      = "gh-main-$idx"
       issuer    = 'https://token.actions.githubusercontent.com'
-      subject   = "repo:${GitHubRepo}:ref:refs/heads/main"
+      subject   = $subj
       audiences = @('api://AzureADTokenExchange')
     } | ConvertTo-Json -Compress
     $tmp = New-TemporaryFile
