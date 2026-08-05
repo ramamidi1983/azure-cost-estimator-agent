@@ -20,6 +20,12 @@ param targetPort int = 8501
 param minReplicas int = 0
 param maxReplicas int = 3
 
+@description('Make ingress internal (private VNet IP only).')
+param internal bool = false
+
+@description('Resource ID of the infrastructure subnet (required when internal=true).')
+param infrastructureSubnetId string = ''
+
 var logName = 'log-${appName}'
 var envName = 'cae-${appName}'
 var uamiName = 'id-${appName}'
@@ -57,6 +63,10 @@ resource env 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: envName
   location: location
   properties: {
+    vnetConfiguration: internal ? {
+      internal: true
+      infrastructureSubnetId: infrastructureSubnetId
+    } : null
     appLogsConfiguration: {
       destination: 'log-analytics'
       logAnalyticsConfiguration: {
@@ -78,7 +88,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
     managedEnvironmentId: env.id
     configuration: {
       ingress: {
-        external: true
+        external: !internal
         targetPort: targetPort
         transport: 'auto'
         allowInsecure: false
@@ -125,3 +135,5 @@ output fqdn string = app.properties.configuration.ingress.fqdn
 output appUrl string = 'https://${app.properties.configuration.ingress.fqdn}'
 output appName string = app.name
 output acrLoginServer string = acr.properties.loginServer
+output envStaticIp string = env.properties.staticIp
+output envDefaultDomain string = env.properties.defaultDomain

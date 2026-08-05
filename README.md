@@ -101,6 +101,36 @@ az containerapp up --name cost-estimator --resource-group rg-cost-estimator `
 
 > Add **Entra ID (Easy Auth)** on the Container App to require sign-in. The Retail Prices API is public (no key), so no app secrets are required.
 
+## Private (internal) hosting — access via Azure Bastion
+
+For sensitive workloads you can host the dashboard **privately** (no public internet exposure).
+A Container Apps environment's internal/external mode is **immutable**, so this recreates the
+environment inside a VNet with an internal load balancer.
+
+```powershell
+# After provision.ps1 has built the ACR image:
+./deploy/make-private.ps1 -ResourceGroup rg-cost-estimator -Location eastus -AcrName <yourAcr>
+```
+
+**What it builds**
+- VNet `vnet-cost-estimator` with `snet-aca` (delegated), `AzureBastionSubnet`, `snet-jump`
+- Container App re-deployed with **internal ingress** (private VNet IP only) via `infra/main.bicep -internal`
+- **Private DNS zone** for the environment domain (wildcard A records → the environment static IP)
+- **Azure Bastion (Basic)** + a **Windows jump VM** (no public IP)
+
+**How to access the private dashboard**
+1. Azure Portal → the jump VM `vm-jump` → **Connect → Bastion**.
+2. Sign in with the admin user/password printed by the script.
+3. In the VM, open **Edge** and browse to the app FQDN
+   (`https://cost-estimator.internal.<env-domain>.azurecontainerapps.io`).
+
+The FQDN resolves **only inside the VNet** (via the private DNS zone), so it is not reachable
+from the public internet. `-internal` support is built into `infra/main.bicep`
+(`internal` + `infrastructureSubnetId` params).
+
+> **Cost note:** Azure Bastion Basic ≈ $140/mo and the jump VM add ongoing cost. To pause spend,
+> delete `bastion-cost` + `pip-bastion` and deallocate `vm-jump` when not in use.
+
 ## Roadmap / making it more "agentic"
 - **LLM-assisted sizing** (optional): add an Azure OpenAI step that reads a messy inventory or an RFP PDF and proposes `target`/`vcpu`/`memory_gb` before pricing. Keep it human-in-the-loop.
 - **Multi-cloud**: add AWS/GCP price adapters for side-by-side comparison.
