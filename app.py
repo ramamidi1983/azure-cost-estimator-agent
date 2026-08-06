@@ -76,6 +76,66 @@ Use the **Modernization** tab to compare Rehost vs Replatform vs Containerize vs
 for the same app workloads before you commit to a target.
 """)
 
+_CACHE_DIR = os.path.join(tempfile.gettempdir(), "cost_estimator_cache")
+_HISTORY_LIMIT = 2
+
+
+def _slot_paths(i: int):
+    return (os.path.join(_CACHE_DIR, f"inv_{i}"),
+            os.path.join(_CACHE_DIR, f"inv_{i}.name"))
+
+
+def _get_history():
+    hist = st.session_state.get("inv_history")
+    if hist is not None:
+        return hist
+    hist = []
+    for i in range(_HISTORY_LIMIT):
+        data_p, name_p = _slot_paths(i)
+        try:
+            with open(data_p, "rb") as fh:
+                data = fh.read()
+            with open(name_p, "r", encoding="utf-8") as fh:
+                name = fh.read().strip()
+            hist.append({"name": name, "data": data})
+        except OSError:
+            continue
+    st.session_state["inv_history"] = hist
+    return hist
+
+
+def _persist_history(hist):
+    st.session_state["inv_history"] = hist
+    try:
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        for i in range(_HISTORY_LIMIT):
+            data_p, name_p = _slot_paths(i)
+            if i < len(hist):
+                with open(data_p, "wb") as fh:
+                    fh.write(hist[i]["data"])
+                with open(name_p, "w", encoding="utf-8") as fh:
+                    fh.write(hist[i]["name"])
+            else:
+                for p in (data_p, name_p):
+                    if os.path.exists(p):
+                        os.remove(p)
+    except OSError:
+        pass
+
+
+def _add_to_history(name: str, data: bytes):
+    hist = [h for h in _get_history() if not (h["name"] == name and h["data"] == data)]
+    hist.insert(0, {"name": name, "data": data})
+    _persist_history(hist[:_HISTORY_LIMIT])
+
+
+def _df_from_bytes(name: str, data: bytes):
+    buf = io.BytesIO(data)
+    if str(name).lower().endswith(("xlsx", "xls")):
+        return pd.read_excel(buf)
+    return pd.read_csv(buf)
+
+
 up = st.file_uploader("Upload inventory (CSV or XLSX)", type=["csv", "xlsx", "xls"])
 with open("samples/sample_inventory.csv", "rb") as _sf:
     _sample_bytes = _sf.read()
@@ -83,9 +143,25 @@ st.download_button("Download sample inventory template", _sample_bytes,
                    file_name="sample_inventory.csv", mime="text/csv",
                    help="Download this template, fill in your workloads, then upload it above.")
 
+_history = _get_history()
+_reload_idx = None
+if _history:
+    st.caption("Reload a recent inventory:")
+    _cols = st.columns(len(_history))
+    for _i, _h in enumerate(_history):
+        with _cols[_i]:
+            if st.button(f"Reload: {_h['name']}", key=f"reload_{_i}",
+                         help="Reload this previously uploaded inventory file."):
+                _reload_idx = _i
+
 df = None
 if up is not None:
-    df = pd.read_excel(up) if up.name.lower().endswith(("xlsx", "xls")) else pd.read_csv(up)
+    raw = up.getvalue()
+    _add_to_history(up.name, raw)
+    df = _df_from_bytes(up.name, raw)
+elif _reload_idx is not None:
+    _h = _history[_reload_idx]
+    df = _df_from_bytes(_h["name"], _h["data"])
 
 if df is not None:
     st.subheader("Inventory")
@@ -144,4 +220,7 @@ if df is not None:
                            file_name="Azure_Cost_Estimate.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
-    st.info("Download the sample inventory template, fill it in, then upload it to begin.")
+    if _history:
+        st.info("Upload an inventory file, or click a **Reload** button above to restore a recent file.")
+    else:
+        st.info("Download the sample inventory template, fill it in, then upload it to begin.")
