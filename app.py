@@ -77,13 +77,15 @@ for the same app workloads before you commit to a target.
 """)
 
 up = st.file_uploader("Upload inventory (CSV or XLSX)", type=["csv", "xlsx", "xls"])
-use_sample = st.button("Use sample inventory")
+with open("samples/sample_inventory.csv", "rb") as _sf:
+    _sample_bytes = _sf.read()
+st.download_button("Download sample inventory template", _sample_bytes,
+                   file_name="sample_inventory.csv", mime="text/csv",
+                   help="Download this template, fill in your workloads, then upload it above.")
 
 df = None
 if up is not None:
     df = pd.read_excel(up) if up.name.lower().endswith(("xlsx", "xls")) else pd.read_csv(up)
-elif use_sample:
-    df = pd.read_csv("samples/sample_inventory.csv")
 
 if df is not None:
     st.subheader("Inventory")
@@ -132,8 +134,7 @@ if df is not None:
 
         params = {"region": region, "term": term, "term_label": TERM_LABEL[term],
                   "ahb": ahb, "resiliency": resiliency,
-                  "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                  "meta": E.meta(region)}
+                  "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
         buf = io.BytesIO()
         tmp = os.path.join(tempfile.gettempdir(), "azure_estimate.xlsx")
         W.build(lines, summ, params, tmp, modern=modern)
@@ -143,4 +144,4 @@ if df is not None:
                            file_name="Azure_Cost_Estimate.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
-    st.info("Upload an inventory file or click **Use sample inventory** to begin.")
+    st.info("Download the sample inventory template, fill it in, then upload it to begin.")

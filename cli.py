@@ -20,8 +20,7 @@ def run(path, region="eastus", term="1y", ahb=False, resiliency=False, out=None)
     modern = E.modernization(df, region=region, term=term, ahb=ahb)
     params = {"region": region, "term": term, "term_label": TERM_LABEL.get(term, term),
               "ahb": ahb, "resiliency": resiliency,
-              "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
-              "meta": E.meta(region)}
+              "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
     if not out:
         base = os.path.splitext(os.path.basename(path))[0]
         out = os.path.join(os.path.dirname(__file__), "output", f"{base}_Azure_Estimate.xlsx")
