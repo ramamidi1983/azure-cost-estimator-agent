@@ -13,6 +13,7 @@ import pricing as P
 import workbook as W
 import assistant as A
 import memory as M
+import tco as TCO
 from cli import TERM_LABEL
 
 REGIONS = [
@@ -408,7 +409,8 @@ with st.sidebar:
 ensure_results()
 
 # ================================================================ COST ESTIMATOR
-tab_est, tab_explore = st.tabs(["Cost estimator", "Service Pricing Explorer"])
+tab_est, tab_tco, tab_explore = st.tabs(
+    ["Cost estimator", "On-prem TCO / ROI", "Service Pricing Explorer"])
 with tab_est:
     with st.expander("How pricing works - IaaS / PaaS / SaaS / combination (read me)", expanded=False):
         st.markdown("""
@@ -735,6 +737,164 @@ for the same app workloads before you commit to a target.
             st.download_button("Download Excel workbook", buf.getvalue(),
                                file_name="Azure_Cost_Estimate.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# ================================================================ ON-PREM TCO / ROI
+with tab_tco:
+    st.subheader("On-prem TCO vs Azure - migration ROI")
+    st.caption("Estimate the annual **total cost of ownership** of running this same workload "
+               "on-premises (VMware, OpenShift or bare-metal), sized automatically from your "
+               "loaded inventory, and compare it against the Azure estimate to show savings, "
+               "ROI and payback. All benchmark assumptions below are editable list-price "
+               "approximations - tune them to your environment.")
+
+    inv = st.session_state.get("inventory")
+    fp = TCO.footprint(inv)
+    if fp["vm_count"] == 0:
+        st.info("Load an inventory (or add servers) in the **Cost estimator** tab first - "
+                "the on-prem estate is sized from your workload's vCPU, memory and storage.")
+    else:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total vCPU", f"{fp['vcpu']:,.0f}")
+        m2.metric("Total RAM", f"{fp['memory_gb']:,.0f} GB")
+        m3.metric("Total storage", f"{fp['storage_gb']:,.0f} GB")
+        m4.metric("VMs / servers", f"{fp['vm_count']:,}")
+
+        platform = st.selectbox("On-prem platform", list(TCO.PLATFORMS.keys()), key="tco_platform")
+        base = TCO.PLATFORMS[platform]
+        a = dict(base)
+
+        with st.expander("Host sizing & hardware assumptions", expanded=False):
+            hc1, hc2, hc3 = st.columns(3)
+            a["cores_per_host"] = hc1.number_input(
+                "Physical cores / host", 4, 256, int(base["cores_per_host"]), 4,
+                key="tco_cores")
+            a["vcpu_per_core"] = hc2.number_input(
+                "vCPU per core (overcommit)", 1.0, 12.0, float(base["vcpu_per_core"]), 0.5,
+                key="tco_overcommit")
+            a["ram_per_host_gb"] = hc3.number_input(
+                "RAM per host (GB)", 64, 4096, int(base["ram_per_host_gb"]), 64,
+                key="tco_ram")
+            a["headroom_factor"] = hc1.number_input(
+                "HA / headroom factor", 1.0, 2.0, float(base["headroom_factor"]), 0.05,
+                key="tco_headroom", help="N+1 redundancy and growth spare capacity.")
+            a["host_capex"] = hc2.number_input(
+                "Server capex ($ / host)", 2000, 100000, int(base["host_capex"]), 500,
+                key="tco_hostcapex")
+            a["hardware_life_years"] = hc3.number_input(
+                "Hardware life (years)", 3, 7, int(base["hardware_life_years"]), 1,
+                key="tco_life")
+            a["storage_capex_per_gb"] = hc1.number_input(
+                "Storage capex ($ / usable GB)", 0.02, 2.0, float(base["storage_capex_per_gb"]),
+                0.01, key="tco_stgcapex")
+            a["storage_usable_factor"] = hc2.number_input(
+                "Usable / raw storage", 0.3, 1.0, float(base["storage_usable_factor"]), 0.05,
+                key="tco_usable", help="Usable capacity after RAID and overhead.")
+            a["hw_support_pct"] = hc3.number_input(
+                "Annual HW/SW support (% of capex)", 0.0, 0.5, float(base["hw_support_pct"]),
+                0.01, key="tco_support")
+
+        with st.expander("Licensing, facilities & labor assumptions", expanded=False):
+            lc1, lc2, lc3 = st.columns(3)
+            a["platform_lic_per_core_year"] = lc1.number_input(
+                "Platform + OS license ($ / core / yr)", 0, 2000,
+                int(base["platform_lic_per_core_year"]), 10, key="tco_lic",
+                help="VMware/OpenShift subscription or Windows Datacenter, incl. guest OS.")
+            a["power_watts_per_host"] = lc2.number_input(
+                "Power draw ($W / host)", 100, 2000, int(base["power_watts_per_host"]), 50,
+                key="tco_watts")
+            a["pue"] = lc3.number_input(
+                "PUE", 1.0, 2.5, float(base["pue"]), 0.05, key="tco_pue",
+                help="Power usage effectiveness of the datacenter.")
+            a["kwh_cost"] = lc1.number_input(
+                "Electricity ($ / kWh)", 0.02, 0.60, float(base["kwh_cost"]), 0.01,
+                key="tco_kwh")
+            a["facilities_per_host_year"] = lc2.number_input(
+                "Facilities ($ / host / yr)", 0, 10000, int(base["facilities_per_host_year"]),
+                100, key="tco_fac", help="Rack space, cooling infrastructure, real estate.")
+            a["network_per_host_year"] = lc3.number_input(
+                "Network ($ / host / yr)", 0, 5000, int(base["network_per_host_year"]), 50,
+                key="tco_net")
+            a["vms_per_admin"] = lc1.number_input(
+                "VMs managed per admin (FTE)", 10, 500, int(base["vms_per_admin"]), 10,
+                key="tco_vmsadmin")
+            a["admin_fte_cost"] = lc2.number_input(
+                "Loaded admin cost ($ / FTE / yr)", 40000, 300000, int(base["admin_fte_cost"]),
+                5000, key="tco_ftecost")
+
+        tco = TCO.compute_tco(fp, a)
+
+        # Azure comparison basis (from the priced results, if available).
+        azure_annual = None
+        res = st.session_state.get("results")
+        if res and res.get("summ") is not None:
+            tot = res["summ"][res["summ"]["area"] == "TOTAL"]
+            if not tot.empty:
+                azure_annual = float(tot.iloc[0]["annual"])
+
+        st.divider()
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Hosts required", f"{tco['hosts']:,}",
+                  help=f"{tco['bound']}-bound; {tco['licensed_cores']:,} licensed cores.")
+        s2.metric("On-prem / month", f"${tco['monthly']:,.0f}")
+        s3.metric("On-prem / year", f"${tco['annual']:,.0f}")
+        s4.metric("On-prem 3-year", f"${tco['annual']*3:,.0f}")
+
+        bd = TCO.breakdown_frame(tco)
+        bc1, bc2 = st.columns([3, 2])
+        with bc1:
+            st.markdown("**On-prem annual cost breakdown**")
+            st.bar_chart(bd.set_index("Category")["Annual"])
+        with bc2:
+            st.dataframe(bd.style.format({"Annual": "${:,.0f}"}),
+                         use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.markdown("### Migration ROI")
+        if azure_annual is None:
+            st.warning("Price your workload in the **Cost estimator** tab (click *Estimate cost*) "
+                       "to compare against Azure and compute ROI.")
+        else:
+            rc1, rc2 = st.columns([1, 3])
+            years = rc1.selectbox("Horizon (years)", [1, 3, 5], index=1, key="tco_years")
+            migration_cost = rc2.number_input(
+                "One-time migration cost ($)", 0, 100_000_000, 0, 5000, key="tco_migcost",
+                help="Assessment, tooling, professional services, cutover, training.")
+            ops_pct = rc1.slider(
+                "Azure ops labor (% of on-prem admin)", 0, 100,
+                int(round(float(base.get("azure_ops_pct", 0.40)) * 100)), 5,
+                key="tco_azops",
+                help="Cloud still needs operations effort - typically 30-50% of on-prem "
+                     "admin labor. Added to the Azure side for a fair comparison.")
+            azure_ops_annual = tco["admin_labor"] * (ops_pct / 100.0)
+            r = TCO.roi(tco["annual"], azure_annual, float(migration_cost),
+                        years=int(years), azure_ops_annual=azure_ops_annual)
+
+            g1, g2, g3, g4 = st.columns(4)
+            g1.metric(f"On-prem {years}-yr", f"${r['onprem_total']:,.0f}")
+            g2.metric(f"Azure {years}-yr", f"${r['azure_total']:,.0f}",
+                      help="Includes selected term/AHB discounts plus estimated Azure "
+                           "operations labor.")
+            g3.metric(f"Net savings ({years}-yr)", f"${r['net_savings']:,.0f}",
+                      delta=f"{r['savings_pct']:.0f}% vs on-prem")
+            payback = (f"{r['payback_months']:.1f} mo" if r['payback_months'] is not None
+                       else "n/a")
+            g4.metric("Payback period", payback,
+                      help="Months for cumulative savings to cover the migration cost.")
+
+            st.caption(f"ROI over {years} years: **{r['roi_pct']:.0f}%** on an Azure + migration "
+                       f"investment of ${r['azure_total'] + r['migration_cost']:,.0f} "
+                       f"(Azure incl. ~${azure_ops_annual:,.0f}/yr ops labor). "
+                       f"Estimated monthly savings vs on-prem: ${r['monthly_savings']:,.0f}.")
+
+            comp = pd.DataFrame({
+                "Option": [f"On-prem ({platform})", "Azure"],
+                f"{years}-year total": [round(r["onprem_total"], 0), round(r["azure_total"], 0)],
+            })
+            st.bar_chart(comp.set_index("Option")[f"{years}-year total"])
+
+        st.caption("Benchmarks are editable approximations for planning discussions, not a formal "
+                   "quote. Azure figures reflect the region, term and Azure Hybrid Benefit "
+                   "settings chosen in the Cost estimator tab.")
 
 # ================================================================ SERVICE PRICING EXPLORER
 with tab_explore:
