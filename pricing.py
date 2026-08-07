@@ -6,7 +6,9 @@ Docs: https://learn.microsoft.com/rest/api/cost-management/retail-prices/azure-r
 import json, os, time, urllib.parse, urllib.request
 
 API = "https://prices.azure.com/api/retail/prices?api-version=2023-01-01-preview&$filter="
-CACHE_DIR = os.path.join(os.path.dirname(__file__), ".cache")
+# Durable price cache on the Azure Files mount when PERSIST_DIR is set, else local dir.
+_PERSIST = os.environ.get("PERSIST_DIR")
+CACHE_DIR = os.path.join(_PERSIST, "price_cache") if _PERSIST else os.path.join(os.path.dirname(__file__), ".cache")
 CACHE_TTL = 60 * 60 * 24  # 24h
 
 
@@ -167,3 +169,72 @@ def redis_price(sku_meter, region, tier="Standard"):
 
 
 HOURS_PER_MONTH = 730
+
+# Fallback $/GiB-mo if the live meter is unavailable for a region.
+_ANF_FALLBACK_GIB_MO = {"standard": 0.1475, "premium": 0.2942, "ultra": 0.3927}
+
+
+def netapp_files_rate(region: str, tier: str = "Standard"):
+    """Azure NetApp Files provisioned capacity $/GiB-month for the given tier
+    (Standard | Premium | Ultra). Meters are published per GiB/Hour; convert to month."""
+    tier = (tier or "Standard").strip().capitalize()
+    for it in _query(f"serviceName eq 'Azure NetApp Files' and armRegionName eq '{region}' "
+                     f"and priceType eq 'Consumption'"):
+        mn = it.get("meterName", "")
+        if mn == f"{tier} Capacity":
+            rp = it.get("retailPrice")
+            if rp:
+                return round(rp * HOURS_PER_MONTH, 4)
+    return _ANF_FALLBACK_GIB_MO.get(tier.lower(), 0.1475)
+
+
+# Reserved-capacity ("bulk") blocks are sold as 100 TiB or 1 PiB commitments.
+_ANF_BLOCK_GIB = {"100 TiB": 100 * 1024, "1 PiB": 1024 * 1024}
+
+
+def netapp_files_reserved(region: str, tier: str = "Standard", block: str = "100 TiB"):
+    """Azure NetApp Files reserved ('bulk') capacity effective $/GiB-month for 1yr & 3yr.
+    Reservations are committed in fixed blocks (100 TiB or 1 PiB); the API publishes the
+    total reservation price for the term, so we normalize to an effective $/GiB-month."""
+    tier = (tier or "Standard").strip().capitalize()
+    blk_gib = _ANF_BLOCK_GIB.get(block, _ANF_BLOCK_GIB["100 TiB"])
+    out = {"r1y": None, "r3y": None, "block": block}
+    for it in _query(f"serviceName eq 'Azure NetApp Files' and armRegionName eq '{region}' "
+                     f"and priceType eq 'Reservation'"):
+        if it.get("meterName", "") == f"{tier} - {block} Capacity":
+            rp = it.get("retailPrice"); term = it.get("reservationTerm")
+            if rp and term == "1 Year":
+                out["r1y"] = round(rp / blk_gib / 12.0, 4)
+            elif rp and term == "3 Years":
+                out["r3y"] = round(rp / blk_gib / 36.0, 4)
+    cons = netapp_files_rate(region, tier)
+    if out["r1y"] is None:
+        out["r1y"] = round(cons * 0.82, 4)  # ~18% typical reserved discount
+    if out["r3y"] is None:
+        out["r3y"] = out["r1y"]
+    return out
+
+
+def explore_prices(service: str, region: str, price_type: str = "Consumption",
+                   contains: str = None, limit: int = 300):
+    """Generic price lookup for ANY Azure service in ANY region. Returns a list of
+    normalized rows: {sku, meter, product, unit, type, payg, sp1y, sp3y, reservationTerm}.
+    Used by the Service Pricing Explorer. `price_type` is 'Consumption' or 'Reservation'."""
+    filt = f"serviceName eq '{service}' and armRegionName eq '{region}'"
+    if price_type:
+        filt += f" and priceType eq '{price_type}'"
+    rows = []
+    for it in _query(filt, max_pages=20):
+        mn = it.get("meterName", ""); pn = it.get("productName", "")
+        if contains and contains.lower() not in (mn + " " + pn + " " + it.get("skuName", "")).lower():
+            continue
+        sp = _sp(it)
+        rows.append({
+            "sku": it.get("skuName", ""), "meter": mn, "product": pn,
+            "unit": it.get("unitOfMeasure", ""), "type": it.get("priceType", ""),
+            "payg": it.get("retailPrice"), "sp1y": sp.get("1 Year"),
+            "sp3y": sp.get("3 Years"), "reservationTerm": it.get("reservationTerm", ""),
+        })
+        if len(rows) >= limit:
+            break
+    return rows

@@ -24,6 +24,7 @@ import pricing as P
 CFG = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "config", "skus.yaml")))
 HOURS = P.HOURS_PER_MONTH
 TF = CFG["term_factors"]
+DISK_GB_MO = CFG["addons"].get("managed_disk_premium_ssd_gb_mo", 0.12)
 
 
 # ---------------------------------------------------------------- column mapping
@@ -152,7 +153,15 @@ def _role_cat(role, name):
 def resolve_target(disposition, role, name, explicit):
     """Return a concrete target key using disposition + role. Defaults to IaaS 'vm'."""
     if explicit:
-        return explicit.lower(), "explicit"
+        ex = explicit.lower()
+        if ex in ("netapp", "netappfiles", "azure netapp files", "nas"):
+            return "anf", "explicit"
+        return ex, "explicit"
+    # File/NAS storage workloads -> Azure NetApp Files, regardless of disposition bucket.
+    t = f"{role} {name}".lower()
+    if any(k in t for k in ("netapp", "anf", "nas", "file server", "fileserver",
+                            "file share", "fileshare", "nfs")):
+        return "anf", str(disposition or "").strip().lower() or "file-storage"
     disp = str(disposition or "").strip().lower()
     bucket = CFG["disposition_map"].get(disp, "iaas" if disp == "" else "iaas")
     if bucket == "skip":
@@ -175,20 +184,41 @@ def resolve_target(disposition, role, name, explicit):
 
 
 # ---------------------------------------------------------------- cost functions
-# Each returns dict: {sku, model, rate_basis, monthly}
-def cost_vm(vcpu, mem, os_type, hours, qty, term, region, ahb=False, sku=None):
+# Each returns dict: {sku, model, rate_basis, monthly, compute_monthly, storage_monthly}
+# monthly always == compute_monthly + storage_monthly. storage_sku (optional) labels
+# the storage line item emitted by estimate().
+def cost_vm(vcpu, mem, os_type, hours, qty, term, region, ahb=False, sku=None, storage=0.0):
     sku = sku or _pick(CFG["vm_catalog"], vcpu, mem)["sku"]
     pr = P.vm_price(sku, region, os_type)
     if not pr:
-        return {"sku": sku, "model": "IaaS", "rate_basis": "N/A", "monthly": 0.0, "note": "price not found"}
-    rate = {"payg": pr["payg"], "1y": pr["sp1y"], "3y": pr["sp3y"]}.get(term) or pr["payg"]
+        return {"sku": sku, "model": "IaaS", "rate_basis": "N/A", "monthly": 0.0,
+                "compute_monthly": 0.0, "storage_monthly": 0.0, "note": "price not found"}
+    is_win = os_type.lower().startswith("win")
+    lin = P.vm_price(sku, region, "linux") if is_win else pr
     basis = {"payg": "PAYG", "1y": "1yr SP", "3y": "3yr SP"}[term]
-    if ahb and os_type.startswith("win"):
-        lin = P.vm_price(sku, region, "linux")
-        if lin:
-            rate = {"payg": lin["payg"], "1y": lin["sp1y"], "3y": lin["sp3y"]}.get(term) or lin["payg"]
-            basis += "+AHB"
-    return {"sku": sku, "model": "IaaS (VM)", "rate_basis": basis, "monthly": qty * rate * hours}
+
+    if ahb and is_win and lin:
+        # Azure Hybrid Benefit strips the Windows license -> pure Linux compute (savings-plan aware)
+        rate = {"payg": lin["payg"], "1y": lin.get("sp1y"), "3y": lin.get("sp3y")}.get(term) or lin["payg"]
+        basis += "+AHB"
+    else:
+        rate = {"payg": pr["payg"], "1y": pr.get("sp1y"), "3y": pr.get("sp3y")}.get(term)
+        if rate is None:
+            # The Windows meter often carries no savings plan; savings apply to the compute
+            # portion only. Derive: Linux compute savings-plan rate + Windows license surcharge.
+            if is_win and lin:
+                lin_rate = {"1y": lin.get("sp1y"), "3y": lin.get("sp3y")}.get(term)
+                if lin_rate is not None and lin.get("payg") is not None and pr.get("payg") is not None:
+                    surcharge = max(pr["payg"] - lin["payg"], 0.0)
+                    rate = lin_rate + surcharge
+            if rate is None:
+                rate = pr["payg"]
+                basis = "PAYG"
+    comp = qty * rate * hours
+    disk = qty * float(storage or 0.0) * DISK_GB_MO
+    return {"sku": sku, "model": "IaaS (VM)", "rate_basis": basis, "monthly": comp + disk,
+            "compute_monthly": comp, "storage_monthly": disk,
+            "storage_sku": "Managed Disk (Premium SSD)"}
 
 
 def cost_aca(vcpu, mem, hours, qty, term, region):
@@ -198,22 +228,27 @@ def cost_aca(vcpu, mem, hours, qty, term, region):
         dm = aca.get("ded_mem_hr_1y") if term != "payg" else aca.get("ded_mem_hr")
         m = qty * (vcpu * dv + mem * dm) * hours
         return {"sku": "ACA Dedicated", "model": "Container Apps",
-                "rate_basis": "1yr SP" if term != "payg" else "PAYG", "monthly": m}
+                "rate_basis": "1yr SP" if term != "payg" else "PAYG",
+                "monthly": m, "compute_monthly": m, "storage_monthly": 0.0}
     cv, cm = aca["cons_vcpu_sec"], aca["cons_mem_sec"]
     m = qty * (vcpu * cv + mem * cm) * hours * 3600
-    return {"sku": "ACA Consumption", "model": "Container Apps", "rate_basis": "active-hrs", "monthly": m}
+    return {"sku": "ACA Consumption", "model": "Container Apps", "rate_basis": "active-hrs",
+            "monthly": m, "compute_monthly": m, "storage_monthly": 0.0}
 
 
-def cost_aks(vcpu, mem, hours, qty, term, region, sku=None):
+def cost_aks(vcpu, mem, hours, qty, term, region, sku=None, storage=0.0):
     node = _pick(CFG["vm_catalog"], vcpu, mem)
     nsku = sku or node["sku"]
     pr = P.vm_price(nsku, region, "linux")
     rate = {"payg": pr["payg"], "1y": pr["sp1y"], "3y": pr["sp3y"]}.get(term) or pr["payg"]
     nodes_cost = qty * rate * hours
     fee = P.aks_cluster_fee(region) * HOURS  # one cluster control-plane fee
+    disk = qty * float(storage or 0.0) * DISK_GB_MO
+    comp = nodes_cost + fee
     return {"sku": f"AKS {qty}x{nsku}", "model": "Container (AKS)",
             "rate_basis": {"payg": "PAYG", "1y": "1yr SP", "3y": "3yr SP"}[term],
-            "monthly": nodes_cost + fee}
+            "monthly": comp + disk, "compute_monthly": comp, "storage_monthly": disk,
+            "storage_sku": "Managed Disk (Premium SSD)"}
 
 
 def cost_appservice(vcpu, mem, hours, qty, term, region, sku=None):
@@ -221,11 +256,13 @@ def cost_appservice(vcpu, mem, hours, qty, term, region, sku=None):
     psku = sku or plan["sku"]
     pr = P.appservice_price(psku, region)
     if not pr:
-        return {"sku": psku, "model": "PaaS (App Service)", "rate_basis": "N/A", "monthly": 0.0}
+        return {"sku": psku, "model": "PaaS (App Service)", "rate_basis": "N/A",
+                "monthly": 0.0, "compute_monthly": 0.0, "storage_monthly": 0.0}
     rate = {"payg": pr["payg"], "1y": pr["sp1y"], "3y": pr["sp3y"]}.get(term) or pr["payg"]
+    m = qty * rate * hours
     return {"sku": f"App Service {psku}", "model": "PaaS (App Service)",
             "rate_basis": {"payg": "PAYG", "1y": "1yr SP", "3y": "3yr SP"}[term],
-            "monthly": qty * rate * hours}
+            "monthly": m, "compute_monthly": m, "storage_monthly": 0.0}
 
 
 def cost_hyperscale(vcore, storage, qty, term, region):
@@ -233,12 +270,14 @@ def cost_hyperscale(vcore, storage, qty, term, region):
     if term == "payg":
         comp = vcore * hs["compute_payg_hr"] * HOURS; basis = "PAYG"
     elif term == "3y" and hs["reserved_3y_vcore_yr"]:
-        comp = vcore * hs["reserved_3y_vcore_yr"] / 12.0; basis = "3yr Reserved"
+        comp = vcore * hs["reserved_3y_vcore_yr"] / 36.0; basis = "3yr Reserved"
     else:
         comp = vcore * hs["reserved_1y_vcore_yr"] / 12.0; basis = "1yr Reserved"
-    m = qty * (comp + storage * hs["storage_gb_mo"])
+    cm = qty * comp
+    sm = qty * storage * hs["storage_gb_mo"]
     return {"sku": f"Hyperscale {int(vcore)} vCore", "model": "PaaS (SQL Hyperscale)",
-            "rate_basis": basis, "monthly": m}
+            "rate_basis": basis, "monthly": cm + sm, "compute_monthly": cm, "storage_monthly": sm,
+            "storage_sku": "Hyperscale storage"}
 
 
 def cost_sqldb(vcore, storage, qty, term, region):
@@ -246,21 +285,26 @@ def cost_sqldb(vcore, storage, qty, term, region):
     if term == "payg":
         comp = vcore * r["compute_payg_hr"] * HOURS; basis = "PAYG"
     elif term == "3y":
-        comp = vcore * r["r3y"] / 12.0; basis = "3yr Reserved"
+        comp = vcore * r["r3y"] / 36.0; basis = "3yr Reserved"
     else:
         comp = vcore * r["r1y"] / 12.0; basis = "1yr Reserved"
-    m = qty * (comp + storage * r["storage_gb_mo"])
+    cm = qty * comp
+    sm = qty * storage * r["storage_gb_mo"]
     return {"sku": f"SQL DB GP {int(vcore)} vCore", "model": "PaaS (Azure SQL DB)",
-            "rate_basis": basis, "monthly": m}
+            "rate_basis": basis, "monthly": cm + sm, "compute_monthly": cm, "storage_monthly": sm,
+            "storage_sku": "SQL DB storage"}
 
 
 def cost_flexdb(kind, vcore, storage, qty, term, region):
     vhr = PDB[f"{kind}_gp_vcore_hr"]; shr = PDB[f"{kind}_storage_gb_mo"]
     comp = vcore * vhr * HOURS * TF[term]
-    m = qty * (comp + storage * shr)
+    cm = qty * comp
+    sm = qty * storage * shr
     label = {"postgres": "PaaS (PostgreSQL Flex)", "mysql": "PaaS (MySQL Flex)"}[kind]
     return {"sku": f"{kind.title()} GP {int(vcore)} vCore", "model": label,
-            "rate_basis": f"{term} (approx)", "monthly": m}
+            "rate_basis": f"{term} (approx)", "monthly": cm + sm,
+            "compute_monthly": cm, "storage_monthly": sm,
+            "storage_sku": f"{kind.title()} Flex storage"}
 
 
 def cost_redis(mem, qty, term, region):
@@ -269,20 +313,205 @@ def cost_redis(mem, qty, term, region):
     rate = pr["payg"] if pr else 0.138
     m = qty * rate * HOURS * TF[term]
     return {"sku": f"Redis {r['tier']} {r['sku']}", "model": "PaaS (Cache for Redis)",
-            "rate_basis": f"{term} (approx)", "monthly": m}
+            "rate_basis": f"{term} (approx)", "monthly": m,
+            "compute_monthly": m, "storage_monthly": 0.0}
 
 
 def cost_cosmos(ru, storage, qty, term, region):
     ru = ru or 4000
     comp = (ru / 100.0) * PDB["cosmos_ru_100_hr"] * HOURS * TF[term]
-    m = qty * (comp + storage * PDB["cosmos_storage_gb_mo"])
+    cm = qty * comp
+    sm = qty * storage * PDB["cosmos_storage_gb_mo"]
     return {"sku": f"Cosmos {int(ru)} RU/s", "model": "PaaS (Cosmos DB)",
-            "rate_basis": f"{term} (approx)", "monthly": m}
+            "rate_basis": f"{term} (approx)", "monthly": cm + sm,
+            "compute_monthly": cm, "storage_monthly": sm,
+            "storage_sku": "Cosmos DB storage"}
 
 
 def cost_saas(users, unit_price):
+    m = (users or 0) * (unit_price or 0)
     return {"sku": "SaaS license", "model": "SaaS (per-user)", "rate_basis": "license",
-            "monthly": (users or 0) * (unit_price or 0)}
+            "monthly": m, "compute_monthly": m, "storage_monthly": 0.0}
+
+
+def cost_anf(storage, qty, region, tier="Standard", term="payg"):
+    """Azure NetApp Files: provisioned capacity priced $/GiB-month. Storage-only service
+    (no compute line). Minimum provisioned capacity pool is 100 GiB. The pricing term
+    selects the offering: 'payg' = Consumption, '1y'/'3y' = Reserved ('bulk') capacity."""
+    tier = (tier or "Standard").strip().capitalize()
+    gib = max(float(storage or 0), 100.0)  # ANF minimum capacity pool is 100 GiB
+    if term == "1y":
+        rate = P.netapp_files_reserved(region, tier)["r1y"]; basis = f"{tier} Reserved 1yr (bulk)"
+    elif term == "3y":
+        rate = P.netapp_files_reserved(region, tier)["r3y"]; basis = f"{tier} Reserved 3yr (bulk)"
+    else:
+        rate = P.netapp_files_rate(region, tier); basis = f"{tier} Consumption $/GiB-mo"
+    sm = qty * gib * rate
+    return {"sku": f"ANF {tier} ({int(gib)} GiB)", "model": "PaaS (Azure NetApp Files)",
+            "rate_basis": basis, "monthly": sm,
+            "compute_monthly": 0.0, "storage_monthly": sm,
+            "storage_sku": f"Azure NetApp Files {tier}"}
+
+
+# ---------------------------------------------------------------- AI/manual overrides
+def apply_row_edits(df, row_edits):
+    """Apply AI 'row_edits' to the raw inventory DataFrame (on a copy) and return it.
+    Each edit: {match: <name substr>, set: {name, environment, role, vcpu, memory_gb,
+    storage_gb, quantity, os, target, disposition, hours, unit_price}}. Matches on 'name'
+    (case-insensitive substring)."""
+    if df is None or getattr(df, "empty", True) or not row_edits:
+        return df
+    out = df.copy()
+    cols = {c.strip().lower(): c for c in out.columns}
+    keys = ("name", "environment", "role", "vcpu", "memory_gb", "storage_gb", "quantity",
+            "os", "target", "disposition", "hours", "unit_price")
+    name_col = cols.get("name")
+    if not name_col:
+        return out
+    for edit in row_edits:
+        match = str(edit.get("match", "")).strip()
+        sets = edit.get("set") or {}
+        if not match or not sets:
+            continue
+        mask = out[name_col].astype(str).str.contains(match, case=False, regex=False)
+        if not mask.any():
+            continue
+        for k, v in sets.items():
+            if k not in keys:
+                continue
+            col = cols.get(k)
+            if col is None:
+                col = k
+                out[col] = ""
+                cols[k] = col
+            out.loc[mask, col] = v
+    return out
+
+
+def apply_row_ops(df, row_ops):
+    """Apply structural AI 'row_ops' to the raw inventory DataFrame (on a copy) and return it.
+    Each op is one of:
+      {"op": "delete", "match": "<name substr>"}      -> drop rows whose name contains match
+      {"op": "dedupe", "subset": ["name", ...]}        -> drop duplicate rows (subset optional)
+      {"op": "add", "set": {name, environment, role, disposition, target, vcpu, memory_gb,
+                            os, storage_gb, quantity, hours, unit_price}}  -> append a new row
+    """
+    if df is None or getattr(df, "empty", True) or not row_ops:
+        return df
+    out = df.copy()
+    cols = {c.strip().lower(): c for c in out.columns}
+    name_col = cols.get("name")
+    add_keys = ("name", "environment", "role", "disposition", "target", "vcpu", "memory_gb",
+                "os", "storage_gb", "quantity", "hours", "unit_price")
+    for op in row_ops:
+        if not isinstance(op, dict):
+            continue
+        kind = str(op.get("op", "")).strip().lower()
+        if kind == "delete" and name_col is not None:
+            match = str(op.get("match", "")).strip()
+            if match:
+                mask = out[name_col].astype(str).str.contains(match, case=False, regex=False)
+                out = out[~mask]
+        elif kind == "dedupe":
+            subset = op.get("subset")
+            sub = None
+            if isinstance(subset, list) and subset:
+                sub = [cols.get(str(s).strip().lower()) for s in subset]
+                sub = [s for s in sub if s] or None
+            # Normalize to string for a robust duplicate comparison, then keep first.
+            keyframe = out.astype(str)
+            dup_mask = keyframe.duplicated(subset=sub, keep="first")
+            out = out[~dup_mask.values]
+        elif kind == "add":
+            sets = op.get("set") or {}
+            row = {}
+            for k, v in sets.items():
+                lk = str(k).strip().lower()
+                if lk in add_keys:
+                    row[cols.get(lk, lk)] = v
+            if row:
+                out = pd.concat([out, pd.DataFrame([row])], ignore_index=True)
+    return out.reset_index(drop=True)
+
+
+def build_summary(lines, resiliency=False):
+    """Build the area-grouped summary DataFrame (optional resiliency add-in + TOTAL)
+    from a lines DataFrame. Separate so overrides can recompute without re-pricing."""
+    if lines is None or lines.empty:
+        return pd.DataFrame(columns=["area", "monthly", "annual"])
+    lines = lines.copy()
+    resil_total = 0.0
+    if resiliency:
+        prod = lines[lines["environment"].str.lower().str.startswith("prod")]
+        db_ha = prod[prod["model"].str.contains("SQL|Hyperscale|PostgreSQL|MySQL|Cosmos", regex=True)]["monthly"].sum()
+        vm_asr = prod[prod["model"].str.contains("VM|AKS")]["quantity"].sum() * CFG["addons"]["asr_instance_mo"]
+        resil_total = db_ha + vm_asr
+
+    def area(row):
+        e = str(row["environment"]).lower()
+        if not e.startswith("prod"):
+            return "Non-Production"
+        return "Prod - " + str(row["model"])
+    lines["area"] = lines.apply(area, axis=1)
+    summ = lines.groupby("area", as_index=False)["monthly"].sum()
+    if resil_total:
+        summ = pd.concat([summ, pd.DataFrame([{"area": "Resiliency Add-In", "monthly": resil_total}])],
+                         ignore_index=True)
+    summ["annual"] = summ["monthly"] * 12
+    total = pd.DataFrame([{"area": "TOTAL", "monthly": summ["monthly"].sum(), "annual": summ["annual"].sum()}])
+    summ = pd.concat([summ, total], ignore_index=True)
+    return summ
+
+
+def apply_overrides(lines, ov):
+    """Apply pricing overrides to a priced lines DataFrame and return a new copy.
+    ov keys (all optional): global_multiplier (float), by_model {substr: mult},
+    by_name {substr: mult}, set_monthly {substr: absolute $/month}."""
+    if lines is None or lines.empty or not ov:
+        return lines
+    df = lines.copy()
+    monthly = df["monthly"].astype(float)
+    gm = ov.get("global_multiplier")
+    if isinstance(gm, (int, float)):
+        monthly = monthly * float(gm)
+    for substr, mult in (ov.get("by_model") or {}).items():
+        if isinstance(mult, (int, float)):
+            mask = df["model"].astype(str).str.contains(str(substr), case=False, regex=False)
+            monthly = monthly.where(~mask, monthly * float(mult))
+    for substr, mult in (ov.get("by_name") or {}).items():
+        if isinstance(mult, (int, float)):
+            mask = df["name"].astype(str).str.contains(str(substr), case=False, regex=False)
+            monthly = monthly.where(~mask, monthly * float(mult))
+    for substr, amount in (ov.get("set_monthly") or {}).items():
+        if isinstance(amount, (int, float)):
+            mask = df["name"].astype(str).str.contains(str(substr), case=False, regex=False)
+            monthly = monthly.where(~mask, float(amount))
+    df["monthly"] = monthly
+    return df
+
+
+def inventory_stats(df, max_names=200):
+    """Deterministic full-sheet duplicate/row analytics (never truncated), so the UI and the
+    AI assistant can report accurate counts regardless of how many rows fit in the LLM context.
+    Returns row_count, unique_names, name_duplicate_rows (rows removed if deduped by name,
+    keeping first), duplicate_name_groups, full_row_duplicate_rows, and duplicate_names
+    (a {name: occurrences} map, capped at max_names, highest first)."""
+    try:
+        df = _normalize_columns(df)
+    except Exception:  # noqa: BLE001
+        pass
+    if df is None or getattr(df, "empty", True):
+        return {"row_count": 0}
+    n = int(len(df))
+    stats = {"row_count": n, "full_row_duplicate_rows": int(df.astype(str).duplicated().sum())}
+    if "name" in df.columns:
+        vc = df["name"].astype(str).value_counts()
+        dupe = vc[vc > 1]
+        stats["unique_names"] = int(vc.size)
+        stats["name_duplicate_rows"] = int((dupe - 1).sum())
+        stats["duplicate_name_groups"] = int(dupe.size)
+        stats["duplicate_names"] = {str(k): int(v) for k, v in list(dupe.items())[:max_names]}
+    return stats
 
 
 # ---------------------------------------------------------------- main estimate
@@ -318,11 +547,11 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
             continue
 
         if target == "vm":
-            c = cost_vm(vcpu, mem, os_type, hours, qty, term, region, ahb, sku_hint or None)
+            c = cost_vm(vcpu, mem, os_type, hours, qty, term, region, ahb, sku_hint or None, storage)
         elif target == "aca":
             c = cost_aca(vcpu, mem, hours, qty, term, region)
         elif target == "aks":
-            c = cost_aks(vcpu, mem, hours, qty, term, region, sku_hint or None)
+            c = cost_aks(vcpu, mem, hours, qty, term, region, sku_hint or None, storage)
         elif target == "appservice":
             c = cost_appservice(vcpu, mem, hours, qty, term, region, sku_hint or None)
         elif target == "hyperscale":
@@ -337,34 +566,43 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
             c = cost_cosmos(storage and storage * 10 or 4000, storage, qty, term, region)
         elif target == "saas":
             c = cost_saas(qty, unit_price)
+        elif target in ("anf", "netapp"):
+            _anf_tier = sku_hint.capitalize() if sku_hint.lower() in ("standard", "premium", "ultra") else "Standard"
+            c = cost_anf(storage, qty, region, tier=_anf_tier, term=term)
         else:
-            c = cost_vm(vcpu, mem, os_type, hours, qty, term, region, ahb)
+            c = cost_vm(vcpu, mem, os_type, hours, qty, term, region, ahb, None, storage)
         base.update(c)
         base["hours"] = hours
-        rows.append(base)
+
+        storage_monthly = float(c.get("storage_monthly", 0.0) or 0.0)
+        compute_monthly = float(c.get("compute_monthly", c.get("monthly", 0.0)) or 0.0)
+        storage_sku = c.get("storage_sku") or f"{c.get('model', '')} storage"
+
+        comp_row = {k: v for k, v in base.items()
+                    if k not in ("compute_monthly", "storage_monthly", "storage_sku")}
+        comp_row["component"] = "Compute"
+        comp_row["monthly"] = compute_monthly
+        comp_row["storage_gb"] = 0.0
+        # Skip a zero-cost compute row for storage-only services (e.g. Azure NetApp Files).
+        if compute_monthly > 0 or storage_monthly <= 0:
+            rows.append(comp_row)
+
+        if storage_monthly > 0:
+            stor_row = {k: v for k, v in base.items()
+                        if k not in ("compute_monthly", "storage_monthly", "storage_sku")}
+            stor_row["component"] = "Storage"
+            stor_row["monthly"] = storage_monthly
+            stor_row["sku"] = storage_sku
+            # Storage-only services (e.g. ANF) keep their real basis (Consumption/Reserved);
+            # split-storage lines of compute services get a generic storage label.
+            stor_row["rate_basis"] = c.get("rate_basis", "storage $/GB-mo") \
+                if compute_monthly <= 0 else "storage $/GB-mo"
+            stor_row["vcpu"] = 0.0
+            stor_row["memory_gb"] = 0.0
+            rows.append(stor_row)
 
     lines = pd.DataFrame(rows)
-
-    resil_total = 0.0
-    if resiliency and not lines.empty:
-        prod = lines[lines["environment"].str.lower().str.startswith("prod")]
-        db_ha = prod[prod["model"].str.contains("SQL|Hyperscale|PostgreSQL|MySQL|Cosmos", regex=True)]["monthly"].sum()
-        vm_asr = prod[prod["model"].str.contains("VM|AKS")]["quantity"].sum() * CFG["addons"]["asr_instance_mo"]
-        resil_total = db_ha + vm_asr
-
-    def area(row):
-        e = row["environment"].lower()
-        if not e.startswith("prod"):
-            return "Non-Production"
-        return "Prod - " + row["model"]
-    lines["area"] = lines.apply(area, axis=1)
-    summ = lines.groupby("area", as_index=False)["monthly"].sum()
-    if resil_total:
-        summ = pd.concat([summ, pd.DataFrame([{"area": "Resiliency Add-In", "monthly": resil_total}])],
-                         ignore_index=True)
-    summ["annual"] = summ["monthly"] * 12
-    total = pd.DataFrame([{"area": "TOTAL", "monthly": summ["monthly"].sum(), "annual": summ["annual"].sum()}])
-    summ = pd.concat([summ, total], ignore_index=True)
+    summ = build_summary(lines, resiliency)
     return lines, summ
 
 

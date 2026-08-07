@@ -48,6 +48,8 @@ term_factors:
 
 # ---- Fixed monthly add-on rates ----
 addons:
+  # Managed OS/data disk $/GB/mo for IaaS VM & AKS node storage (Premium SSD approx).
+  managed_disk_premium_ssd_gb_mo: 0.12
   expressroute_gateway_ergw1az_hr: 0.361
   expressroute_circuit_1gbps_mo: 436.0
   app_gateway_waf_fixed_hr: 0.36

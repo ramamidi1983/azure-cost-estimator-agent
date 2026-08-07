@@ -74,6 +74,7 @@ DETAIL_COLS = [
     ("role", "Role / Server Type", 20, None),
     ("disposition", "Disposition", 16, None),
     ("model", "Azure Service", 24, None),
+    ("component", "Component", 12, None),
     ("sku", "Azure Type (SKU)", 22, None),
     ("vcpu", "vCPU", 8, NUM0),
     ("memory_gb", "Memory (GB)", 12, NUM1),
