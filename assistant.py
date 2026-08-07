@@ -1,7 +1,8 @@
 """AI assistant: turn a natural-language request into structured changes to the estimate.
 
-Uses Azure OpenAI (gpt-5.5) when configured via env vars:
-    AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_OPENAI_DEPLOYMENT (default gpt-chat55),
+Uses Azure OpenAI when configured via env vars:
+    AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY (optional; omit to use Entra ID /
+    managed identity), AZURE_OPENAI_DEPLOYMENT (your deployment name, default gpt-4o),
     AZURE_OPENAI_API_VERSION (default 2024-10-21)
 Falls back to a deterministic rule-based parser when no keys are present, so the chat
 still works offline / before the model is wired up.
@@ -106,7 +107,7 @@ def _client():
     if not is_configured():
         return None, None
     endpoint = os.environ["AZURE_OPENAI_ENDPOINT"]
-    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-chat55")
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
     api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
     api_key = os.getenv("AZURE_OPENAI_API_KEY")
     from openai import AzureOpenAI

@@ -13,14 +13,14 @@
   Prereqs: az CLI (logged in: az login), gh CLI (logged in: gh auth login).
 
 .EXAMPLE
-  ./deploy/provision.ps1 -ResourceGroup rg-cost-estimator -Location eastus -GitHubRepo ramamidi1983/azure-cost-estimator-agent
+  ./deploy/provision.ps1 -ResourceGroup rg-myapp -Location eastus -GitHubRepo <owner>/<repo>
 #>
 [CmdletBinding()]
 param(
   [string]$ResourceGroup = 'rg-cost-estimator',
   [string]$Location      = 'eastus',
   [string]$AppName       = 'cost-estimator',
-  [string]$GitHubRepo    = 'ramamidi1983/azure-cost-estimator-agent',
+  [string]$GitHubRepo    = '',   # e.g. owner/repo; auto-detected from git remote if empty
   [string]$AcrName       = '',   # auto-generated if empty
   [switch]$SkipGitHubOidc
 )
@@ -62,6 +62,18 @@ Say "App URL: $appUrl"
 # ---- GitHub OIDC for CI/CD ---------------------------------------------------
 if (-not $SkipGitHubOidc) {
   Say 'Configuring GitHub OIDC (federated identity, no stored secrets)…'
+  if (-not $GitHubRepo) {
+    # Auto-detect "owner/repo" from the current git remote.
+    $GitHubRepo = (gh repo view --json nameWithOwner -q .nameWithOwner 2>$null)
+    if (-not $GitHubRepo) {
+      $remote = git -C $repoRoot remote get-url origin 2>$null
+      if ($remote -match 'github\.com[:/](.+?)(?:\.git)?$') { $GitHubRepo = $Matches[1] }
+    }
+    if (-not $GitHubRepo) {
+      throw 'Could not determine GitHub repo. Pass -GitHubRepo <owner>/<repo> or run -SkipGitHubOidc.'
+    }
+    Say "Detected GitHub repo: $GitHubRepo"
+  }
   $appDisplay = "gh-oidc-$AppName"
   $appId = az ad app list --display-name $appDisplay --query "[0].appId" -o tsv
   if (-not $appId) {

@@ -10,6 +10,12 @@ venv/
 output/
 *.xlsx
 
+# Secrets / local config
+.env
+.env.*
+!.env.example
+*.local
+
 # OS
 .DS_Store
 Thumbs.db

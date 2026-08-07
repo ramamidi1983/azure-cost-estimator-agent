@@ -70,20 +70,38 @@ Everything is scripted — infrastructure as code + one command + auto-deploy on
 **Prereqs:** `az login` and `gh auth login` (already authenticated).
 
 ```powershell
-# One command provisions Azure AND wires up CI/CD:
+# One command provisions Azure AND wires up CI/CD.
+# -GitHubRepo is auto-detected from your git remote if omitted.
 ./deploy/provision.ps1 `
-  -ResourceGroup rg-cost-estimator `
+  -ResourceGroup rg-myapp `
   -Location eastus `
-  -GitHubRepo ramamidi1983/azure-cost-estimator-agent
+  -GitHubRepo <owner>/<repo>
 ```
 
-The script prints the live dashboard URL, e.g. `https://cost-estimator.<region>.azurecontainerapps.io`.
+The script prints the live dashboard URL, e.g. `https://<app>.<region>.azurecontainerapps.io`.
 
 **Continuous deployment:** after provisioning, every push to `main` triggers
 `.github/workflows/deploy.yml`, which logs in with OIDC, runs `az acr build`, and
 updates the Container App to the new image. Config is passed via GitHub Actions
 **repo variables** (set automatically by the provision script):
 `AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, ACR_NAME, CONTAINERAPP_NAME`.
+
+### Configuration & secrets
+
+This repo stores **no secrets**. Authentication to Azure uses **OIDC federated
+identity** for CI and **managed identity / Entra ID** at runtime — nothing is
+committed. Runtime settings come from environment variables; copy
+[`.env.example`](.env.example) to `.env` (git-ignored) for local runs:
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `AZURE_OPENAI_ENDPOINT` | optional | Enables the AI inventory assistant. Omit to use the built-in rule-based fallback. |
+| `AZURE_OPENAI_DEPLOYMENT` | optional | **Your** deployment name (default `gpt-4o`). |
+| `AZURE_OPENAI_API_VERSION` | optional | Default `2024-10-21`. |
+| `AZURE_OPENAI_API_KEY` | optional | Leave blank to use Entra ID / managed identity (recommended). |
+| `PERSIST_DIR` | optional | Durable dir for inventory/pricing cache; defaults to temp. |
+
+The Azure Retail Prices API used for all pricing is **public — no key required**.
 
 **Files**
 | File | Purpose |
@@ -95,7 +113,7 @@ updates the Container App to the new image. Config is passed via GitHub Actions
 
 **Quick manual alternative** (no CI/CD):
 ```powershell
-az containerapp up --name cost-estimator --resource-group rg-cost-estimator `
+az containerapp up --name <app> --resource-group <rg> `
   --source . --ingress external --target-port 8501 --env-vars STREAMLIT_SERVER_HEADLESS=true
 ```
 
