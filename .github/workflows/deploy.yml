@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       IMAGE_TAG: ${{ github.sha }}
+      IMAGE_NAME: cost-estimator
     steps:
       - uses: actions/checkout@v4
 
@@ -36,8 +37,8 @@ jobs:
         run: |
           az acr build \
             --registry "${{ vars.ACR_NAME }}" \
-            --image "${{ vars.CONTAINERAPP_NAME }}:${IMAGE_TAG}" \
-            --image "${{ vars.CONTAINERAPP_NAME }}:latest" \
+            --image "${IMAGE_NAME}:${IMAGE_TAG}" \
+            --image "${IMAGE_NAME}:latest" \
             .
 
       - name: Update Container App
@@ -45,7 +46,7 @@ jobs:
           az containerapp update \
             --name "${{ vars.CONTAINERAPP_NAME }}" \
             --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --image "${{ vars.ACR_NAME }}.azurecr.io/${{ vars.CONTAINERAPP_NAME }}:${IMAGE_TAG}"
+            --image "${{ vars.ACR_NAME }}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
 
       - name: Show app URL
         run: |
