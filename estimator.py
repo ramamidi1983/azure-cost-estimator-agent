@@ -26,6 +26,7 @@ HOURS = P.HOURS_PER_MONTH
 TF = CFG["term_factors"]
 DISK_GB_MO = CFG["addons"].get("managed_disk_premium_ssd_gb_mo", 0.12)
 DEFAULT_CONTAINER_OPTIONS = {
+    "container_strategy": "existing",
     "pool_aks": False,
     "aks_demand_factor": 0.50,
     "aks_target_utilization": 0.70,
@@ -163,6 +164,8 @@ def container_options(options=None):
     """Return validated container-cost assumptions with safe defaults."""
     out = dict(DEFAULT_CONTAINER_OPTIONS)
     out.update(options or {})
+    if out["container_strategy"] not in ("existing", "aks", "aca"):
+        out["container_strategy"] = "existing"
     for key in ("aks_demand_factor", "aks_target_utilization", "aca_prod_active_factor",
                 "aca_nonprod_active_factor"):
         out[key] = min(max(float(out[key]), 0.01), 1.0)
@@ -596,6 +599,10 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
         unit_price = float(r.get("unit_price", 0) or 0)
 
         target, disp_used = resolve_target(disp, role, name, override)
+        if (opts["container_strategy"] in ("aks", "aca")
+                and target not in ("skip", "saas")
+                and _role_cat(role, name) == "app"):
+            target = opts["container_strategy"]
         base = {"name": name, "environment": env, "role": role, "disposition": disp or "(none->IaaS)",
                 "target": target, "quantity": qty, "region": region,
                 "os": os_type, "vcpu": vcpu, "memory_gb": mem, "storage_gb": storage}

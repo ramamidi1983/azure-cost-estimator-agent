@@ -128,6 +128,34 @@ class ContainerOptimizationTests(unittest.TestCase):
         self.assertLess(three_year["monthly"], one_year["monthly"])
         self.assertEqual(one_year["rate_basis"], "1yr SP active-hrs")
 
+    def test_container_strategy_retargets_rehost_apps_in_main_estimate(self):
+        rehost = self.inventory.iloc[[0]].copy()
+        rehost.loc[:, "disposition"] = "Rehost"
+        unchanged, _ = E.estimate(rehost)
+        aks, _ = E.estimate(
+            rehost,
+            container_opts={
+                "container_strategy": "aks",
+                "pool_aks": True,
+                "aks_demand_factor": 0.10,
+                "aks_target_utilization": 0.40,
+                "aks_headroom": 0.0,
+            },
+        )
+        aca, _ = E.estimate(
+            rehost,
+            container_opts={
+                "container_strategy": "aca",
+                "optimize_aca": True,
+                "aca_prod_active_factor": 0.05,
+            },
+        )
+        self.assertTrue((unchanged["target"] == "vm").all())
+        self.assertTrue((aks["target"] == "aks").all())
+        self.assertTrue((aca["target"] == "aca").all())
+        self.assertNotEqual(unchanged["monthly"].sum(), aks["monthly"].sum())
+        self.assertNotEqual(unchanged["monthly"].sum(), aca["monthly"].sum())
+
 
 if __name__ == "__main__":
     unittest.main()

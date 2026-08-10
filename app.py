@@ -174,6 +174,7 @@ def _init_state():
     ss.setdefault("p_ahb", False)
     ss.setdefault("p_default_os", "Windows")
     ss.setdefault("p_resiliency", True)
+    ss.setdefault("p_container_strategy", "existing")
     ss.setdefault("p_pool_aks", True)
     ss.setdefault("p_aks_demand_factor", 0.50)
     ss.setdefault("p_aks_target_utilization", 0.70)
@@ -228,6 +229,7 @@ def _sig():
 def container_options():
     ss = st.session_state
     return {
+        "container_strategy": ss.p_container_strategy,
         "pool_aks": ss.p_pool_aks,
         "aks_demand_factor": ss.p_aks_demand_factor,
         "aks_target_utilization": ss.p_aks_target_utilization,
@@ -416,6 +418,19 @@ with st.sidebar:
     st.selectbox("Default OS (for rows with no OS in file)", ["Windows", "Linux"], key="p_default_os")
     st.checkbox("Resiliency add-in (HA replica + ASR)", key="p_resiliency")
     with st.expander("Container cost optimization", expanded=True):
+        st.selectbox(
+            "Apply container scenario to eligible app workloads",
+            ["existing", "aks", "aca"],
+            format_func=lambda value: {
+                "existing": "Keep current disposition / target",
+                "aks": "Price eligible apps on AKS",
+                "aca": "Price eligible apps on Container Apps",
+            }[value],
+            key="p_container_strategy",
+            help="This controls the main Summary total. Eligible app/web/API workloads are "
+                 "re-targeted only when AKS or Container Apps is selected. Database, storage, "
+                 "Retain, Retire, and SaaS rows keep their existing targets.",
+        )
         st.checkbox("Apply shared AKS pooling by environment (Prod / NonProd)", key="p_pool_aks",
                     help="Shares the AKS control-plane fee and models pooled node capacity "
                          "instead of charging a separate cluster for every application.")
@@ -746,8 +761,9 @@ for the same app workloads before you commit to a target.
                     st.info(
                         "The four alternative columns remain visible for comparison. The "
                         "**Selected** columns follow the sidebar checkboxes. The overall estimate "
-                        "changes only for inventory rows whose target is AKS or Container Apps; "
-                        "Rehost/IaaS rows remain unchanged."
+                        "follows **Apply container scenario to eligible app workloads**. When "
+                        "'Keep current disposition / target' is selected, Rehost/IaaS rows remain "
+                        "unchanged."
                     )
                     mdata = modern[modern[modern.columns[0]] != "TOTAL"]
                     numeric = list(mdata.select_dtypes(include="number").columns)

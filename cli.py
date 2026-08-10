@@ -43,9 +43,13 @@ if __name__ == "__main__":
                     help="Share AKS clusters by Prod/NonProd and pool node capacity")
     ap.add_argument("--optimize-container-apps", action="store_true",
                     help="Use Container Apps Consumption scaling assumptions")
+    ap.add_argument("--container-strategy", default="existing",
+                    choices=["existing", "aks", "aca"],
+                    help="Keep existing targets or re-target eligible app workloads")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    opts = {"pool_aks": a.pool_aks, "optimize_aca": a.optimize_container_apps}
+    opts = {"container_strategy": a.container_strategy, "pool_aks": a.pool_aks,
+            "optimize_aca": a.optimize_container_apps}
     lines, summ, out = run(a.inventory, a.region, a.term, a.ahb, a.resiliency, a.out, opts)
     print(summ.to_string(index=False))
     print("\nWorkbook:", out)

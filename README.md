@@ -32,6 +32,9 @@ Production/Non-Production Container Apps active-time assumptions. The Modernizat
 shows per-application AKS, shared AKS, always-on Container Apps, optimized Container Apps, and
 the selected container option. Alternative columns always remain visible for comparison, while
 the **Selected** columns and AKS/Container Apps line items follow the sidebar checkboxes.
+Choose **Apply container scenario to eligible app workloads** to make AKS or Container Apps
+replace the current target for app/web/API rows in the main Summary. Keeping the current target
+leaves Rehost/IaaS costs unchanged and uses the container values only for comparison.
 
 ```powershell
 pip install -r requirements.txt
@@ -40,7 +43,7 @@ pip install -r requirements.txt
 python cli.py samples\sample_inventory.csv --region eastus --term 1y --ahb --resiliency
 
 # Cost-efficient container scenario
-python cli.py samples\sample_inventory.csv --region eastus --term 1y --pool-aks --optimize-container-apps
+python cli.py samples\sample_inventory.csv --region eastus --term 1y --container-strategy aks --pool-aks
 
 # Dashboard
 streamlit run app.py

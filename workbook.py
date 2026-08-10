@@ -172,6 +172,10 @@ def _mapping(wb, lines, params):
     container_opts = params.get("container_options") or {}
     if container_opts:
         assumptions += [
+            ("Container scenario applied to app workloads",
+             {"existing": "Keep current target", "aks": "AKS",
+              "aca": "Container Apps"}.get(
+                  container_opts.get("container_strategy"), "Keep current target")),
             ("Shared AKS pooling", "Yes" if container_opts.get("pool_aks") else "No"),
             ("Container demand vs source", f"{container_opts.get('aks_demand_factor', 0):.0%}"),
             ("Target AKS utilization", f"{container_opts.get('aks_target_utilization', 0):.0%}"),
