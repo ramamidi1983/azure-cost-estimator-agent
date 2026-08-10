@@ -160,6 +160,23 @@ def _role_cat(role, name):
     return "app"
 
 
+def _is_container_candidate(role, name, disposition="", target=""):
+    """Identify app/web/API workloads without treating every unknown server as an app."""
+    explicit_target = str(target or "").strip().lower()
+    if explicit_target in ("aks", "aca"):
+        return True
+    text = f"{role} {name}".lower()
+    app_hints = (
+        "app", "application", "web", "api", "middleware", "microservice",
+        "frontend", "backend", "tomcat", "jboss", "weblogic", "iis", "nginx",
+    )
+    if any(hint in text for hint in app_hints):
+        return True
+    disp = str(disposition or "").strip().lower()
+    bucket = CFG["disposition_map"].get(disp)
+    return bucket in ("container", "modernize") and _role_cat(role, name) == "app"
+
+
 def container_options(options=None):
     """Return validated container-cost assumptions with safe defaults."""
     out = dict(DEFAULT_CONTAINER_OPTIONS)
@@ -601,7 +618,7 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
         target, disp_used = resolve_target(disp, role, name, override)
         if (opts["container_strategy"] in ("aks", "aca")
                 and target not in ("skip", "saas")
-                and _role_cat(role, name) == "app"):
+                and _is_container_candidate(role, name, disp, override)):
             target = opts["container_strategy"]
         base = {"name": name, "environment": env, "role": role, "disposition": disp or "(none->IaaS)",
                 "target": target, "quantity": qty, "region": region,
@@ -707,7 +724,8 @@ def modernization(df, region="eastus", term="1y", ahb=False, default_os="linux",
         bucket = CFG["disposition_map"].get(disp, "iaas")
         if bucket in ("saas", "skip"):
             continue
-        if _role_cat(role, name) != "app":
+        target_hint = str(r.get("target", "") or "")
+        if not _is_container_candidate(role, name, disp, target_hint):
             continue
         vcpu = float(r.get("vcpu", 0) or 0); mem = float(r.get("memory_gb", 0) or 0)
         env = str(r.get("environment", "Prod") or "Prod")

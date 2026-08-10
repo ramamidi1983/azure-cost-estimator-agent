@@ -156,6 +156,24 @@ class ContainerOptimizationTests(unittest.TestCase):
         self.assertNotEqual(unchanged["monthly"].sum(), aks["monthly"].sum())
         self.assertNotEqual(unchanged["monthly"].sum(), aca["monthly"].sum())
 
+    def test_unknown_servers_are_not_automatically_containerized(self):
+        unknown = pd.DataFrame([{
+            "name": "server-001",
+            "environment": "Prod",
+            "role": "",
+            "disposition": "Rehost",
+            "vcpu": 4,
+            "memory_gb": 16,
+            "quantity": 1,
+            "hours": 730,
+        }])
+        lines, _ = E.estimate(
+            unknown,
+            container_opts={"container_strategy": "aks", "pool_aks": True},
+        )
+        self.assertTrue((lines["target"] == "vm").all())
+        self.assertFalse((lines["role"] == "AKS platform").any())
+
 
 if __name__ == "__main__":
     unittest.main()

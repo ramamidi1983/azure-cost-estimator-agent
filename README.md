@@ -35,6 +35,8 @@ the **Selected** columns and AKS/Container Apps line items follow the sidebar ch
 Choose **Apply container scenario to eligible app workloads** to make AKS or Container Apps
 replace the current target for app/web/API rows in the main Summary. Keeping the current target
 leaves Rehost/IaaS costs unchanged and uses the container values only for comparison.
+Eligibility is based on explicit app/web/API role or name hints, a Refactor/Modernize disposition,
+or an existing AKS/Container Apps target. Rows with unknown roles are not automatically converted.
 
 ```powershell
 pip install -r requirements.txt

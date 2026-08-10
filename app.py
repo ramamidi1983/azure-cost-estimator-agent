@@ -428,7 +428,9 @@ with st.sidebar:
             }[value],
             key="p_container_strategy",
             help="This controls the main Summary total. Eligible app/web/API workloads are "
-                 "re-targeted only when AKS or Container Apps is selected. Database, storage, "
+                 "re-targeted only when AKS or Container Apps is selected. Eligibility comes "
+                 "from app/web/API role or name hints, Refactor/Modernize disposition, or an "
+                 "explicit AKS/Container Apps target. Unknown servers, databases, storage, "
                  "Retain, Retire, and SaaS rows keep their existing targets.",
         )
         st.checkbox("Apply shared AKS pooling by environment (Prod / NonProd)", key="p_pool_aks",
@@ -763,7 +765,7 @@ for the same app workloads before you commit to a target.
                         "**Selected** columns follow the sidebar checkboxes. The overall estimate "
                         "follows **Apply container scenario to eligible app workloads**. When "
                         "'Keep current disposition / target' is selected, Rehost/IaaS rows remain "
-                        "unchanged."
+                        "unchanged. Only workloads identified as app/web/API candidates are eligible."
                     )
                     mdata = modern[modern[modern.columns[0]] != "TOTAL"]
                     numeric = list(mdata.select_dtypes(include="number").columns)
