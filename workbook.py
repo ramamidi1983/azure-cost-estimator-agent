@@ -141,7 +141,7 @@ def _modernization(wb, modern):
         is_total = str(row[headers[0]]).upper() == "TOTAL"
         for j, c in enumerate(headers, start=1):
             cell = mo.cell(r, j, row[c]); cell.border = BORD
-            if j == 1:
+            if j == 1 or c == "environment":
                 cell.font = BLKB if is_total else BLK
             else:
                 cell.number_format = CUR0
@@ -169,6 +169,20 @@ def _mapping(wb, lines, params):
         ("Scope", "Steady-state hosting only; excludes migration/professional services"),
         ("Excluded", "Retain / Retire dispositions stay on-prem (not priced)"),
     ]
+    container_opts = params.get("container_options") or {}
+    if container_opts:
+        assumptions += [
+            ("Shared AKS pooling", "Yes" if container_opts.get("pool_aks") else "No"),
+            ("Container demand vs source", f"{container_opts.get('aks_demand_factor', 0):.0%}"),
+            ("Target AKS utilization", f"{container_opts.get('aks_target_utilization', 0):.0%}"),
+            ("AKS capacity headroom", f"{container_opts.get('aks_headroom', 0):.0%}"),
+            ("Container Apps Consumption optimization",
+             "Yes" if container_opts.get("optimize_aca") else "No"),
+            ("Container Apps active factor - Prod",
+             f"{container_opts.get('aca_prod_active_factor', 0):.0%}"),
+            ("Container Apps active factor - NonProd",
+             f"{container_opts.get('aca_nonprod_active_factor', 0):.0%}"),
+        ]
     r = 5
     for k, v in assumptions:
         a = m.cell(r, 1, k); a.font = BLKB; a.border = BORD

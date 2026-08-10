@@ -11,7 +11,8 @@ Built from the pricing + workbook pipeline proven on the RFP-Carnival and Goodye
    - **If no disposition and no target are given, the row defaults to standard IaaS (a VM).**
 3. **Price** via the Azure Retail Prices API (cached 24h) for the chosen region/term.
 4. **Apply** toggles: term (PAYG / 1yr / 3yr), Azure Hybrid Benefit, resiliency add-in, prod vs non-prod.
-5. **Produce** a Summary + Line_Items + **Modernization** + Rates_Meta Excel workbook, plus interactive charts and a **modernization comparison** (Rehost vs Replatform vs Containerize vs Modernize) in the dashboard.
+5. **Optimize containers** with reusable shared AKS pools (Prod/NonProd), utilization/headroom assumptions, and Container Apps Consumption scaling.
+6. **Produce** a Summary + Line_Items + **Modernization** + Rates_Meta Excel workbook, plus interactive charts and a **modernization comparison** (Rehost vs Replatform vs Containerize vs Modernize) in the dashboard.
 
 ## Pricing by service model
 - **IaaS** (Rehost / default): size from `vcpu`/`memory_gb` → nearest VM SKU (or `azure_sku` override); live VM rate for the term; optional Azure Hybrid Benefit.
@@ -25,11 +26,20 @@ Built from the pricing + workbook pipeline proven on the RFP-Carnival and Goodye
 Leave `disposition` **and** `target` blank → priced as standard IaaS (VM). See `samples/sample_inventory.csv`.
 
 ## Run locally
+The dashboard enables container optimization by default. Use **Container cost optimization**
+in the sidebar to adjust source-demand conversion, target AKS utilization, HA headroom, and
+Production/Non-Production Container Apps active-time assumptions. The Modernization comparison
+shows per-application AKS, shared AKS, always-on Container Apps, optimized Container Apps, and
+the lowest modeled container option.
+
 ```powershell
 pip install -r requirements.txt
 
 # CLI
 python cli.py samples\sample_inventory.csv --region eastus --term 1y --ahb --resiliency
+
+# Cost-efficient container scenario
+python cli.py samples\sample_inventory.csv --region eastus --term 1y --pool-aks --optimize-container-apps
 
 # Dashboard
 streamlit run app.py

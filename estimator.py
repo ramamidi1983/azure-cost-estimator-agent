@@ -25,6 +25,15 @@ CFG = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "config", "sku
 HOURS = P.HOURS_PER_MONTH
 TF = CFG["term_factors"]
 DISK_GB_MO = CFG["addons"].get("managed_disk_premium_ssd_gb_mo", 0.12)
+DEFAULT_CONTAINER_OPTIONS = {
+    "pool_aks": False,
+    "aks_demand_factor": 0.50,
+    "aks_target_utilization": 0.70,
+    "aks_headroom": 0.20,
+    "optimize_aca": False,
+    "aca_prod_active_factor": 0.70,
+    "aca_nonprod_active_factor": 0.35,
+}
 
 
 # ---------------------------------------------------------------- column mapping
@@ -150,6 +159,34 @@ def _role_cat(role, name):
     return "app"
 
 
+def container_options(options=None):
+    """Return validated container-cost assumptions with safe defaults."""
+    out = dict(DEFAULT_CONTAINER_OPTIONS)
+    out.update(options or {})
+    for key in ("aks_demand_factor", "aks_target_utilization", "aca_prod_active_factor",
+                "aca_nonprod_active_factor"):
+        out[key] = min(max(float(out[key]), 0.01), 1.0)
+    out["aks_headroom"] = min(max(float(out["aks_headroom"]), 0.0), 1.0)
+    out["pool_aks"] = bool(out["pool_aks"])
+    out["optimize_aca"] = bool(out["optimize_aca"])
+    return out
+
+
+def _env_group(environment):
+    value = str(environment or "").strip().lower()
+    return "Prod" if value in ("prod", "production") or value.startswith("prod") else "NonProd"
+
+
+def _aks_compute_factor(options):
+    return (options["aks_demand_factor"] * (1.0 + options["aks_headroom"])
+            / options["aks_target_utilization"])
+
+
+def _aca_active_factor(environment, options):
+    return (options["aca_prod_active_factor"] if _env_group(environment) == "Prod"
+            else options["aca_nonprod_active_factor"])
+
+
 def resolve_target(disposition, role, name, explicit):
     """Return a concrete target key using disposition + role. Defaults to IaaS 'vm'."""
     if explicit:
@@ -221,28 +258,35 @@ def cost_vm(vcpu, mem, os_type, hours, qty, term, region, ahb=False, sku=None, s
             "storage_sku": "Managed Disk (Premium SSD)"}
 
 
-def cost_aca(vcpu, mem, hours, qty, term, region):
+def cost_aca(vcpu, mem, hours, qty, term, region, profile="auto"):
     aca = P.aca_rates(region)
-    if hours >= HOURS - 1:
+    if profile == "dedicated" or (profile == "auto" and hours >= HOURS - 1):
         dv = aca.get("ded_vcpu_hr_1y") if term != "payg" else aca.get("ded_vcpu_hr")
         dm = aca.get("ded_mem_hr_1y") if term != "payg" else aca.get("ded_mem_hr")
+        dv = dv if dv is not None else aca.get("ded_vcpu_hr", 0.0)
+        dm = dm if dm is not None else aca.get("ded_mem_hr", 0.0)
         m = qty * (vcpu * dv + mem * dm) * hours
         return {"sku": "ACA Dedicated", "model": "Container Apps",
                 "rate_basis": "1yr SP" if term != "payg" else "PAYG",
                 "monthly": m, "compute_monthly": m, "storage_monthly": 0.0}
-    cv, cm = aca["cons_vcpu_sec"], aca["cons_mem_sec"]
+    cv, cm = aca.get("cons_vcpu_sec", 0.0), aca.get("cons_mem_sec", 0.0)
     m = qty * (vcpu * cv + mem * cm) * hours * 3600
     return {"sku": "ACA Consumption", "model": "Container Apps", "rate_basis": "active-hrs",
             "monthly": m, "compute_monthly": m, "storage_monthly": 0.0}
 
 
-def cost_aks(vcpu, mem, hours, qty, term, region, sku=None, storage=0.0):
+def cost_aks(vcpu, mem, hours, qty, term, region, sku=None, storage=0.0,
+             include_cluster_fee=True, compute_factor=1.0):
     node = _pick(CFG["vm_catalog"], vcpu, mem)
     nsku = sku or node["sku"]
     pr = P.vm_price(nsku, region, "linux")
+    if not pr:
+        return {"sku": f"AKS {qty}x{nsku}", "model": "Container (AKS)",
+                "rate_basis": "N/A", "monthly": 0.0, "compute_monthly": 0.0,
+                "storage_monthly": 0.0, "note": "price not found"}
     rate = {"payg": pr["payg"], "1y": pr["sp1y"], "3y": pr["sp3y"]}.get(term) or pr["payg"]
-    nodes_cost = qty * rate * hours
-    fee = P.aks_cluster_fee(region) * HOURS  # one cluster control-plane fee
+    nodes_cost = qty * rate * hours * max(float(compute_factor), 0.0)
+    fee = P.aks_cluster_fee(region) * HOURS if include_cluster_fee else 0.0
     disk = qty * float(storage or 0.0) * DISK_GB_MO
     comp = nodes_cost + fee
     return {"sku": f"AKS {qty}x{nsku}", "model": "Container (AKS)",
@@ -444,7 +488,9 @@ def build_summary(lines, resiliency=False):
     if resiliency:
         prod = lines[lines["environment"].str.lower().str.startswith("prod")]
         db_ha = prod[prod["model"].str.contains("SQL|Hyperscale|PostgreSQL|MySQL|Cosmos", regex=True)]["monthly"].sum()
-        vm_asr = prod[prod["model"].str.contains("VM|AKS")]["quantity"].sum() * CFG["addons"]["asr_instance_mo"]
+        protectable = prod[~prod["role"].astype(str).eq("AKS platform")]
+        vm_asr = (protectable[protectable["model"].str.contains("VM|AKS")]["quantity"].sum()
+                  * CFG["addons"]["asr_instance_mo"])
         resil_total = db_ha + vm_asr
 
     def area(row):
@@ -515,9 +561,12 @@ def inventory_stats(df, max_names=200):
 
 
 # ---------------------------------------------------------------- main estimate
-def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, default_os="linux"):
+def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, default_os="linux",
+             container_opts=None):
     df = _normalize_columns(df)
+    opts = container_options(container_opts)
     rows = []
+    aks_groups = set()
     for _, r in df.iterrows():
         name = str(r.get("name", "unnamed"))
         env = str(r.get("environment", "Prod") or "Prod")
@@ -549,9 +598,20 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
         if target == "vm":
             c = cost_vm(vcpu, mem, os_type, hours, qty, term, region, ahb, sku_hint or None, storage)
         elif target == "aca":
-            c = cost_aca(vcpu, mem, hours, qty, term, region)
+            if opts["optimize_aca"]:
+                active_hours = hours * _aca_active_factor(env, opts)
+                c = cost_aca(vcpu, mem, active_hours, qty, term, region, profile="consumption")
+                c["rate_basis"] += f" ({_aca_active_factor(env, opts):.0%} active)"
+            else:
+                c = cost_aca(vcpu, mem, hours, qty, term, region)
         elif target == "aks":
-            c = cost_aks(vcpu, mem, hours, qty, term, region, sku_hint or None, storage)
+            if opts["pool_aks"]:
+                aks_groups.add(_env_group(env))
+                c = cost_aks(vcpu, mem, hours, qty, term, region, sku_hint or None, storage,
+                             include_cluster_fee=False, compute_factor=_aks_compute_factor(opts))
+                c["rate_basis"] += " pooled"
+            else:
+                c = cost_aks(vcpu, mem, hours, qty, term, region, sku_hint or None, storage)
         elif target == "appservice":
             c = cost_appservice(vcpu, mem, hours, qty, term, region, sku_hint or None)
         elif target == "hyperscale":
@@ -601,16 +661,31 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
             stor_row["memory_gb"] = 0.0
             rows.append(stor_row)
 
+    if opts["pool_aks"]:
+        fee = P.aks_cluster_fee(region) * HOURS
+        for group in sorted(aks_groups):
+            rows.append({
+                "name": f"Shared AKS Cluster ({group})", "environment": group,
+                "role": "AKS platform", "disposition": "Shared container platform",
+                "target": "aks", "quantity": 1, "region": region, "os": "linux",
+                "vcpu": 0.0, "memory_gb": 0.0, "storage_gb": 0.0,
+                "sku": f"AKS Shared Cluster - {group}", "model": "Container (AKS)",
+                "rate_basis": "Shared control plane", "monthly": fee,
+                "component": "Compute", "hours": HOURS,
+            })
+
     lines = pd.DataFrame(rows)
     summ = build_summary(lines, resiliency)
     return lines, summ
 
 
 # ---------------------------------------------------------------- modernization compare
-def modernization(df, region="eastus", term="1y", ahb=False, default_os="linux"):
+def modernization(df, region="eastus", term="1y", ahb=False, default_os="linux",
+                  container_opts=None):
     """For each APP-type workload, compare cost across modernization paths."""
     df = _normalize_columns(df)
-    out = []
+    opts = container_options(container_opts)
+    candidates = []
     for _, r in df.iterrows():
         name = str(r.get("name", "unnamed"))
         role = str(r.get("role", "") or "")
@@ -621,21 +696,46 @@ def modernization(df, region="eastus", term="1y", ahb=False, default_os="linux")
         if _role_cat(role, name) != "app":
             continue
         vcpu = float(r.get("vcpu", 0) or 0); mem = float(r.get("memory_gb", 0) or 0)
+        env = str(r.get("environment", "Prod") or "Prod")
         os_type = _resolve_os(r.get("os"), default_os)
         hours = float(r.get("hours", HOURS) or HOURS)
         qty = int(float(r.get("quantity", 1) or 1))
-        out.append({
+        candidates.append({
             "name": name,
+            "environment": env,
             "Rehost (VM)": round(cost_vm(vcpu, mem, os_type, hours, qty, term, region, ahb)["monthly"], 2),
             "Replatform (App Service)": round(cost_appservice(vcpu, mem, hours, qty, term, region)["monthly"], 2),
-            "Containerize (AKS)": round(cost_aks(vcpu, mem, hours, qty, term, region)["monthly"], 2),
-            "Modernize (Container Apps)": round(cost_aca(vcpu, mem, hours, qty, term, region)["monthly"], 2),
+            "Containerize (AKS - Per App)": round(
+                cost_aks(vcpu, mem, hours, qty, term, region)["monthly"], 2),
+            "_aks_shared_compute": cost_aks(
+                vcpu, mem, hours, qty, term, region, include_cluster_fee=False,
+                compute_factor=_aks_compute_factor(opts))["monthly"],
+            "Modernize (Container Apps - Always On)": round(
+                cost_aca(vcpu, mem, hours, qty, term, region)["monthly"], 2),
+            "Modernize (Container Apps - Optimized)": round(
+                cost_aca(vcpu, mem, hours * _aca_active_factor(env, opts), qty, term, region,
+                         profile="consumption")["monthly"], 2),
         })
+    group_counts = {}
+    for row in candidates:
+        group = _env_group(row["environment"])
+        group_counts[group] = group_counts.get(group, 0) + 1
+    fee = P.aks_cluster_fee(region) * HOURS
+    out = []
+    for row in candidates:
+        group = _env_group(row["environment"])
+        row["Containerize (AKS - Shared)"] = round(
+            row.pop("_aks_shared_compute") + fee / group_counts[group], 2)
+        shared = row["Containerize (AKS - Shared)"]
+        optimized = row["Modernize (Container Apps - Optimized)"]
+        valid = [value for value in (shared, optimized) if value > 0]
+        row["Best Container Option"] = round(min(valid), 2) if valid else 0.0
+        out.append(row)
     comp = pd.DataFrame(out)
     if not comp.empty:
-        totals = {"name": "TOTAL"}
+        totals = {"name": "TOTAL", "environment": ""}
         for c in comp.columns:
-            if c != "name":
+            if c not in ("name", "environment"):
                 totals[c] = round(comp[c].sum(), 2)
         comp = pd.concat([comp, pd.DataFrame([totals])], ignore_index=True)
     return comp

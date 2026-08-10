@@ -14,12 +14,16 @@ def load(path):
     return pd.read_csv(path)
 
 
-def run(path, region="eastus", term="1y", ahb=False, resiliency=False, out=None):
+def run(path, region="eastus", term="1y", ahb=False, resiliency=False, out=None,
+        container_opts=None):
     df = load(path)
-    lines, summ = E.estimate(df, region=region, term=term, ahb=ahb, resiliency=resiliency)
-    modern = E.modernization(df, region=region, term=term, ahb=ahb)
+    lines, summ = E.estimate(df, region=region, term=term, ahb=ahb,
+                             resiliency=resiliency, container_opts=container_opts)
+    modern = E.modernization(df, region=region, term=term, ahb=ahb,
+                             container_opts=container_opts)
     params = {"region": region, "term": term, "term_label": TERM_LABEL.get(term, term),
               "ahb": ahb, "resiliency": resiliency,
+              "container_options": E.container_options(container_opts),
               "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
     if not out:
         base = os.path.splitext(os.path.basename(path))[0]
@@ -35,8 +39,13 @@ if __name__ == "__main__":
     ap.add_argument("--term", default="1y", choices=["payg", "1y", "3y"])
     ap.add_argument("--ahb", action="store_true", help="Azure Hybrid Benefit")
     ap.add_argument("--resiliency", action="store_true")
+    ap.add_argument("--pool-aks", action="store_true",
+                    help="Share AKS clusters by Prod/NonProd and pool node capacity")
+    ap.add_argument("--optimize-container-apps", action="store_true",
+                    help="Use Container Apps Consumption scaling assumptions")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    lines, summ, out = run(a.inventory, a.region, a.term, a.ahb, a.resiliency, a.out)
+    opts = {"pool_aks": a.pool_aks, "optimize_aca": a.optimize_container_apps}
+    lines, summ, out = run(a.inventory, a.region, a.term, a.ahb, a.resiliency, a.out, opts)
     print(summ.to_string(index=False))
     print("\nWorkbook:", out)

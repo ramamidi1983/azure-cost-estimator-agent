@@ -174,6 +174,13 @@ def _init_state():
     ss.setdefault("p_ahb", False)
     ss.setdefault("p_default_os", "Windows")
     ss.setdefault("p_resiliency", True)
+    ss.setdefault("p_pool_aks", True)
+    ss.setdefault("p_aks_demand_factor", 0.50)
+    ss.setdefault("p_aks_target_utilization", 0.70)
+    ss.setdefault("p_aks_headroom", 0.20)
+    ss.setdefault("p_optimize_aca", True)
+    ss.setdefault("p_aca_prod_active_factor", 0.70)
+    ss.setdefault("p_aca_nonprod_active_factor", 0.35)
     ss.setdefault("inventory", None)     # raw/canonical inventory DataFrame (source of truth)
     ss.setdefault("overrides", {})       # accumulated pricing overrides
     ss.setdefault("results", None)       # {"lines", "summ", "modern"}
@@ -214,7 +221,21 @@ def _sig():
     inv = ss.get("inventory")
     inv_sig = None if inv is None else int(pd.util.hash_pandas_object(inv.astype(str)).sum())
     return json.dumps([inv_sig, ss.p_region, ss.p_term, ss.p_ahb, ss.p_default_os,
-                       ss.p_resiliency, ss.get("overrides")], sort_keys=True, default=str)
+                       ss.p_resiliency, container_options(), ss.get("overrides")],
+                      sort_keys=True, default=str)
+
+
+def container_options():
+    ss = st.session_state
+    return {
+        "pool_aks": ss.p_pool_aks,
+        "aks_demand_factor": ss.p_aks_demand_factor,
+        "aks_target_utilization": ss.p_aks_target_utilization,
+        "aks_headroom": ss.p_aks_headroom,
+        "optimize_aca": ss.p_optimize_aca,
+        "aca_prod_active_factor": ss.p_aca_prod_active_factor,
+        "aca_nonprod_active_factor": ss.p_aca_nonprod_active_factor,
+    }
 
 
 def recompute():
@@ -225,11 +246,13 @@ def recompute():
         return
     os_default = str(ss.p_default_os).lower()
     lines, _ = E.estimate(inv, region=ss.p_region, term=ss.p_term,
-                          ahb=ss.p_ahb, resiliency=ss.p_resiliency, default_os=os_default)
+                          ahb=ss.p_ahb, resiliency=ss.p_resiliency, default_os=os_default,
+                          container_opts=container_options())
     lines = E.apply_overrides(lines, ss.get("overrides") or {})
     summ = E.build_summary(lines, ss.p_resiliency)
     modern = E.modernization(inv, region=ss.p_region, term=ss.p_term,
-                             ahb=ss.p_ahb, default_os=os_default)
+                             ahb=ss.p_ahb, default_os=os_default,
+                             container_opts=container_options())
     ss["results"] = {"lines": lines, "summ": summ, "modern": modern}
 
 
@@ -248,7 +271,8 @@ def ensure_results():
 def build_context():
     ss = st.session_state
     ctx = {"params": {"region": ss.p_region, "term": ss.p_term, "ahb": ss.p_ahb,
-                      "default_os": ss.p_default_os, "resiliency": ss.p_resiliency},
+                      "default_os": ss.p_default_os, "resiliency": ss.p_resiliency,
+                      "container_options": container_options()},
            "active_overrides": ss.get("overrides") or {},
            "inventory_loaded": ss.get("inventory") is not None,
            "priced": bool(ss.get("compute_requested"))}
@@ -391,6 +415,23 @@ with st.sidebar:
                      "read from each row's `os` column, otherwise the Default OS below.")
     st.selectbox("Default OS (for rows with no OS in file)", ["Windows", "Linux"], key="p_default_os")
     st.checkbox("Resiliency add-in (HA replica + ASR)", key="p_resiliency")
+    with st.expander("Container cost optimization", expanded=True):
+        st.checkbox("Pool AKS by environment (Prod / NonProd)", key="p_pool_aks",
+                    help="Shares the AKS control-plane fee and models pooled node capacity "
+                         "instead of charging a separate cluster for every application.")
+        st.slider("Container demand vs source allocation", 0.10, 1.00, step=0.05,
+                  key="p_aks_demand_factor")
+        st.slider("Target AKS node utilization", 0.40, 0.90, step=0.05,
+                  key="p_aks_target_utilization")
+        st.slider("AKS HA / capacity headroom", 0.00, 0.50, step=0.05,
+                  key="p_aks_headroom")
+        st.checkbox("Optimize Container Apps with Consumption scaling", key="p_optimize_aca",
+                    help="Uses Consumption pricing and adjustable active-time factors, including "
+                         "scale-to-zero behavior for intermittent applications.")
+        st.slider("Production active-time factor", 0.05, 1.00, step=0.05,
+                  key="p_aca_prod_active_factor")
+        st.slider("Non-Production active-time factor", 0.05, 1.00, step=0.05,
+                  key="p_aca_nonprod_active_factor")
     st.divider()
     ov = st.session_state.get("overrides") or {}
     if ov:
@@ -672,11 +713,14 @@ for the same app workloads before you commit to a target.
 
             with t_mod:
                 st.subheader("Modernization path comparison")
-                st.caption("Per app workload, $/month. Compare Rehost vs Replatform vs Containerize vs Modernize.")
+                st.caption("Per app workload, $/month. Includes per-app AKS, shared AKS pools, "
+                           "always-on Container Apps, and optimized Consumption scaling.")
                 if modern is not None and not modern.empty:
-                    mchart = modern[modern[modern.columns[0]] != "TOTAL"].set_index(modern.columns[0])
+                    mdata = modern[modern[modern.columns[0]] != "TOTAL"]
+                    numeric = list(mdata.select_dtypes(include="number").columns)
+                    mchart = mdata.set_index(modern.columns[0])[numeric]
                     st.bar_chart(mchart)
-                    fmt = {c: "${:,.0f}" for c in modern.columns if c != modern.columns[0]}
+                    fmt = {c: "${:,.0f}" for c in modern.select_dtypes(include="number").columns}
                     st.dataframe(modern.style.format(fmt), use_container_width=True)
                 else:
                     st.info("No app workloads to compare (modernization applies to app/web/api roles).")
@@ -728,6 +772,7 @@ for the same app workloads before you commit to a target.
             params = {"region": st.session_state.p_region, "term": st.session_state.p_term,
                       "term_label": TERM_LABEL[st.session_state.p_term],
                       "ahb": st.session_state.p_ahb, "resiliency": st.session_state.p_resiliency,
+                      "container_options": container_options(),
                       "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}
             buf = io.BytesIO()
             tmp = os.path.join(tempfile.gettempdir(), "azure_estimate.xlsx")
