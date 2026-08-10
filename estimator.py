@@ -261,17 +261,24 @@ def cost_vm(vcpu, mem, os_type, hours, qty, term, region, ahb=False, sku=None, s
 def cost_aca(vcpu, mem, hours, qty, term, region, profile="auto"):
     aca = P.aca_rates(region)
     if profile == "dedicated" or (profile == "auto" and hours >= HOURS - 1):
-        dv = aca.get("ded_vcpu_hr_1y") if term != "payg" else aca.get("ded_vcpu_hr")
-        dm = aca.get("ded_mem_hr_1y") if term != "payg" else aca.get("ded_mem_hr")
+        suffix = {"payg": "", "1y": "_1y", "3y": "_3y"}[term]
+        dv = aca.get(f"ded_vcpu_hr{suffix}")
+        dm = aca.get(f"ded_mem_hr{suffix}")
         dv = dv if dv is not None else aca.get("ded_vcpu_hr", 0.0)
         dm = dm if dm is not None else aca.get("ded_mem_hr", 0.0)
         m = qty * (vcpu * dv + mem * dm) * hours
         return {"sku": "ACA Dedicated", "model": "Container Apps",
-                "rate_basis": "1yr SP" if term != "payg" else "PAYG",
+                "rate_basis": {"payg": "PAYG", "1y": "1yr SP", "3y": "3yr SP"}[term],
                 "monthly": m, "compute_monthly": m, "storage_monthly": 0.0}
-    cv, cm = aca.get("cons_vcpu_sec", 0.0), aca.get("cons_mem_sec", 0.0)
+    suffix = {"payg": "", "1y": "_1y", "3y": "_3y"}[term]
+    cv = aca.get(f"cons_vcpu_sec{suffix}")
+    cm = aca.get(f"cons_mem_sec{suffix}")
+    cv = cv if cv is not None else aca.get("cons_vcpu_sec", 0.0)
+    cm = cm if cm is not None else aca.get("cons_mem_sec", 0.0)
     m = qty * (vcpu * cv + mem * cm) * hours * 3600
-    return {"sku": "ACA Consumption", "model": "Container Apps", "rate_basis": "active-hrs",
+    basis = {"payg": "PAYG active-hrs", "1y": "1yr SP active-hrs",
+             "3y": "3yr SP active-hrs"}[term]
+    return {"sku": "ACA Consumption", "model": "Container Apps", "rate_basis": basis,
             "monthly": m, "compute_monthly": m, "storage_monthly": 0.0}
 
 

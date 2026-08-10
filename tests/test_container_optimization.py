@@ -13,7 +13,11 @@ ACA_RATES = {
     "ded_mem_hr": 0.01,
     "ded_mem_hr_1y": 0.008,
     "cons_vcpu_sec": 0.00002,
+    "cons_vcpu_sec_1y": 0.000017,
+    "cons_vcpu_sec_3y": 0.000016,
     "cons_mem_sec": 0.000003,
+    "cons_mem_sec_1y": 0.00000255,
+    "cons_mem_sec_3y": 0.00000249,
 }
 
 
@@ -115,6 +119,14 @@ class ContainerOptimizationTests(unittest.TestCase):
             without_platform["area"] == "Resiliency Add-In", "monthly"
         ].iloc[0]
         self.assertEqual(pooled_resiliency, base_resiliency)
+
+    def test_container_apps_consumption_uses_selected_term_rate(self):
+        payg = E.cost_aca(2, 4, 200, 1, "payg", "eastus", profile="consumption")
+        one_year = E.cost_aca(2, 4, 200, 1, "1y", "eastus", profile="consumption")
+        three_year = E.cost_aca(2, 4, 200, 1, "3y", "eastus", profile="consumption")
+        self.assertLess(one_year["monthly"], payg["monthly"])
+        self.assertLess(three_year["monthly"], one_year["monthly"])
+        self.assertEqual(one_year["rate_basis"], "1yr SP active-hrs")
 
 
 if __name__ == "__main__":

@@ -93,15 +93,25 @@ def aca_rates(region: str):
         sp = _sp(it)
         rp = it.get("retailPrice")
         if mn == "Dedicated vCPU Usage":
-            out["ded_vcpu_hr"] = rp; out["ded_vcpu_hr_1y"] = sp.get("1 Year")
+            out["ded_vcpu_hr"] = rp
+            out["ded_vcpu_hr_1y"] = sp.get("1 Year")
+            out["ded_vcpu_hr_3y"] = sp.get("3 Years")
         elif mn == "Dedicated Memory Usage":
-            out["ded_mem_hr"] = rp; out["ded_mem_hr_1y"] = sp.get("1 Year")
+            out["ded_mem_hr"] = rp
+            out["ded_mem_hr_1y"] = sp.get("1 Year")
+            out["ded_mem_hr_3y"] = sp.get("3 Years")
         elif mn == "Dedicated Plan Management":
-            out["ded_mgmt_hr"] = rp; out["ded_mgmt_hr_1y"] = sp.get("1 Year")
+            out["ded_mgmt_hr"] = rp
+            out["ded_mgmt_hr_1y"] = sp.get("1 Year")
+            out["ded_mgmt_hr_3y"] = sp.get("3 Years")
         elif mn == "Standard vCPU Active Usage":
             out["cons_vcpu_sec"] = rp
+            out["cons_vcpu_sec_1y"] = sp.get("1 Year")
+            out["cons_vcpu_sec_3y"] = sp.get("3 Years")
         elif mn == "Standard Memory Active Usage":
             out["cons_mem_sec"] = rp
+            out["cons_mem_sec_1y"] = sp.get("1 Year")
+            out["cons_mem_sec_3y"] = sp.get("3 Years")
     return out
 
 
