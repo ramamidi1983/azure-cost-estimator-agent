@@ -727,9 +727,15 @@ def modernization(df, region="eastus", term="1y", ahb=False, default_os="linux",
         row["Containerize (AKS - Shared)"] = round(
             row.pop("_aks_shared_compute") + fee / group_counts[group], 2)
         shared = row["Containerize (AKS - Shared)"]
+        per_app = row["Containerize (AKS - Per App)"]
+        always_on = row["Modernize (Container Apps - Always On)"]
         optimized = row["Modernize (Container Apps - Optimized)"]
-        valid = [value for value in (shared, optimized) if value > 0]
-        row["Best Container Option"] = round(min(valid), 2) if valid else 0.0
+        selected_aks = shared if opts["pool_aks"] else per_app
+        selected_aca = optimized if opts["optimize_aca"] else always_on
+        row["Selected AKS Scenario"] = selected_aks
+        row["Selected Container Apps Scenario"] = selected_aca
+        valid = [value for value in (selected_aks, selected_aca) if value > 0]
+        row["Selected Container Option"] = round(min(valid), 2) if valid else 0.0
         out.append(row)
     comp = pd.DataFrame(out)
     if not comp.empty:

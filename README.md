@@ -30,7 +30,8 @@ The dashboard enables container optimization by default. Use **Container cost op
 in the sidebar to adjust source-demand conversion, target AKS utilization, HA headroom, and
 Production/Non-Production Container Apps active-time assumptions. The Modernization comparison
 shows per-application AKS, shared AKS, always-on Container Apps, optimized Container Apps, and
-the lowest modeled container option.
+the selected container option. Alternative columns always remain visible for comparison, while
+the **Selected** columns and AKS/Container Apps line items follow the sidebar checkboxes.
 
 ```powershell
 pip install -r requirements.txt

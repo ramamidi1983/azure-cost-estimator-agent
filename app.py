@@ -416,7 +416,7 @@ with st.sidebar:
     st.selectbox("Default OS (for rows with no OS in file)", ["Windows", "Linux"], key="p_default_os")
     st.checkbox("Resiliency add-in (HA replica + ASR)", key="p_resiliency")
     with st.expander("Container cost optimization", expanded=True):
-        st.checkbox("Pool AKS by environment (Prod / NonProd)", key="p_pool_aks",
+        st.checkbox("Apply shared AKS pooling by environment (Prod / NonProd)", key="p_pool_aks",
                     help="Shares the AKS control-plane fee and models pooled node capacity "
                          "instead of charging a separate cluster for every application.")
         st.slider("Container demand vs source allocation", 0.10, 1.00, step=0.05,
@@ -425,7 +425,7 @@ with st.sidebar:
                   key="p_aks_target_utilization")
         st.slider("AKS HA / capacity headroom", 0.00, 0.50, step=0.05,
                   key="p_aks_headroom")
-        st.checkbox("Optimize Container Apps with Consumption scaling", key="p_optimize_aca",
+        st.checkbox("Apply Container Apps Consumption scaling", key="p_optimize_aca",
                     help="Uses Consumption pricing and adjustable active-time factors, including "
                          "scale-to-zero behavior for intermittent applications.")
         st.slider("Production active-time factor", 0.05, 1.00, step=0.05,
@@ -716,6 +716,28 @@ for the same app workloads before you commit to a target.
                 st.caption("Per app workload, $/month. Includes per-app AKS, shared AKS pools, "
                            "always-on Container Apps, and optimized Consumption scaling.")
                 if modern is not None and not modern.empty:
+                    total_row = modern[modern[modern.columns[0]] == "TOTAL"]
+                    if not total_row.empty:
+                        selected = total_row.iloc[0]
+                        caks, caca, cbest = st.columns(3)
+                        caks.metric(
+                            "Selected AKS scenario",
+                            f"${selected['Selected AKS Scenario']:,.0f}/mo",
+                        )
+                        caca.metric(
+                            "Selected Container Apps scenario",
+                            f"${selected['Selected Container Apps Scenario']:,.0f}/mo",
+                        )
+                        cbest.metric(
+                            "Lowest selected container option",
+                            f"${selected['Selected Container Option']:,.0f}/mo",
+                        )
+                    st.info(
+                        "The four alternative columns remain visible for comparison. The "
+                        "**Selected** columns follow the sidebar checkboxes. The overall estimate "
+                        "changes only for inventory rows whose target is AKS or Container Apps; "
+                        "Rehost/IaaS rows remain unchanged."
+                    )
                     mdata = modern[modern[modern.columns[0]] != "TOTAL"]
                     numeric = list(mdata.select_dtypes(include="number").columns)
                     mchart = mdata.set_index(modern.columns[0])[numeric]

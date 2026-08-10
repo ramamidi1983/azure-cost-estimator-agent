@@ -70,11 +70,31 @@ class ContainerOptimizationTests(unittest.TestCase):
         modern = E.modernization(self.inventory)
         self.assertIn("Containerize (AKS - Shared)", modern.columns)
         self.assertIn("Modernize (Container Apps - Optimized)", modern.columns)
-        self.assertIn("Best Container Option", modern.columns)
+        self.assertIn("Selected Container Option", modern.columns)
         prod = modern[modern["name"] == "prod-api"].iloc[0]
         self.assertLess(
             prod["Containerize (AKS - Shared)"],
             prod["Containerize (AKS - Per App)"],
+        )
+
+    def test_modernization_selections_follow_checkboxes(self):
+        optimized = E.modernization(
+            self.inventory,
+            container_opts={"pool_aks": True, "optimize_aca": True},
+        )
+        unoptimized = E.modernization(
+            self.inventory,
+            container_opts={"pool_aks": False, "optimize_aca": False},
+        )
+        opt_total = optimized[optimized["name"] == "TOTAL"].iloc[0]
+        base_total = unoptimized[unoptimized["name"] == "TOTAL"].iloc[0]
+        self.assertLess(
+            opt_total["Selected AKS Scenario"],
+            base_total["Selected AKS Scenario"],
+        )
+        self.assertLess(
+            opt_total["Selected Container Apps Scenario"],
+            base_total["Selected Container Apps Scenario"],
         )
 
     def test_shared_cluster_control_plane_is_not_charged_as_asr_instance(self):
