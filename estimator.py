@@ -34,6 +34,7 @@ DEFAULT_CONTAINER_OPTIONS = {
     "optimize_aca": False,
     "aca_prod_active_factor": 0.70,
     "aca_nonprod_active_factor": 0.35,
+    "anf_autodetect": False,
 }
 
 
@@ -189,6 +190,7 @@ def container_options(options=None):
     out["aks_headroom"] = min(max(float(out["aks_headroom"]), 0.0), 1.0)
     out["pool_aks"] = bool(out["pool_aks"])
     out["optimize_aca"] = bool(out["optimize_aca"])
+    out["anf_autodetect"] = bool(out.get("anf_autodetect", False))
     return out
 
 
@@ -207,18 +209,28 @@ def _aca_active_factor(environment, options):
             else options["aca_nonprod_active_factor"])
 
 
-def resolve_target(disposition, role, name, explicit):
-    """Return a concrete target key using disposition + role. Defaults to IaaS 'vm'."""
+def resolve_target(disposition, role, name, explicit, anf_autodetect=False):
+    """Return a concrete target key using disposition + role. Defaults to IaaS 'vm'.
+
+    Azure NetApp Files is only chosen when the row **explicitly** targets it
+    (target = netapp/anf/nas), or when ``anf_autodetect`` is enabled and the
+    name/role clearly indicates a file/NAS server. Auto-detection is off by
+    default so uploaded VMs are never silently repriced as storage.
+    """
     if explicit:
         ex = explicit.lower()
         if ex in ("netapp", "netappfiles", "azure netapp files", "nas"):
             return "anf", "explicit"
         return ex, "explicit"
-    # File/NAS storage workloads -> Azure NetApp Files, regardless of disposition bucket.
-    t = f"{role} {name}".lower()
-    if any(k in t for k in ("netapp", "anf", "nas", "file server", "fileserver",
-                            "file share", "fileshare", "nfs")):
-        return "anf", str(disposition or "").strip().lower() or "file-storage"
+    # Optional: file/NAS storage workloads -> Azure NetApp Files (opt-in).
+    if anf_autodetect:
+        t = f"{role} {name}".lower()
+        tokens = re.findall(r"[a-z0-9]+", t)
+        strong = ("netapp", "anf", "nas", "nfs", "fileserver", "fileshare")
+        phrases = ("file server", "file share", "file storage")
+        if (any(tok in strong for tok in tokens)
+                or any(p in t for p in phrases)):
+            return "anf", str(disposition or "").strip().lower() or "file-storage"
     disp = str(disposition or "").strip().lower()
     bucket = CFG["disposition_map"].get(disp, "iaas" if disp == "" else "iaas")
     if bucket == "skip":
@@ -615,7 +627,8 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
             sku_hint = ""
         unit_price = float(r.get("unit_price", 0) or 0)
 
-        target, disp_used = resolve_target(disp, role, name, override)
+        target, disp_used = resolve_target(disp, role, name, override,
+                                           anf_autodetect=opts["anf_autodetect"])
         if (opts["container_strategy"] in ("aks", "aca")
                 and target not in ("skip", "saas")
                 and _is_container_candidate(role, name, disp, override)):

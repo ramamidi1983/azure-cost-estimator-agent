@@ -182,6 +182,7 @@ def _init_state():
     ss.setdefault("p_optimize_aca", True)
     ss.setdefault("p_aca_prod_active_factor", 0.70)
     ss.setdefault("p_aca_nonprod_active_factor", 0.35)
+    ss.setdefault("p_anf_autodetect", False)
     ss.setdefault("inventory", None)     # raw/canonical inventory DataFrame (source of truth)
     ss.setdefault("overrides", {})       # accumulated pricing overrides
     ss.setdefault("results", None)       # {"lines", "summ", "modern"}
@@ -237,6 +238,7 @@ def container_options():
         "optimize_aca": ss.p_optimize_aca,
         "aca_prod_active_factor": ss.p_aca_prod_active_factor,
         "aca_nonprod_active_factor": ss.p_aca_nonprod_active_factor,
+        "anf_autodetect": ss.p_anf_autodetect,
     }
 
 
@@ -417,6 +419,11 @@ with st.sidebar:
                      "read from each row's `os` column, otherwise the Default OS below.")
     st.selectbox("Default OS (for rows with no OS in file)", ["Windows", "Linux"], key="p_default_os")
     st.checkbox("Resiliency add-in (HA replica + ASR)", key="p_resiliency")
+    st.checkbox("Auto-detect file/NAS servers as Azure NetApp Files", key="p_anf_autodetect",
+                help="Off by default. When on, servers whose name/role clearly indicate a "
+                     "file or NAS server (netapp, anf, nas, nfs, 'file server') are priced as "
+                     "Azure NetApp Files instead of a VM. Explicitly set a row's target to "
+                     "'anf' to price it as NetApp regardless of this toggle.")
     with st.expander("Container cost optimization", expanded=True):
         st.selectbox(
             "Apply container scenario to eligible app workloads",
