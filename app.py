@@ -699,8 +699,14 @@ for the same app workloads before you commit to a target.
                 st.subheader("Summary by area")
                 show = summ[summ["area"] != "TOTAL"].set_index("area")
                 st.bar_chart(show["monthly"])
-                st.dataframe(summ.style.format({"monthly": "${:,.0f}", "annual": "${:,.0f}"}),
-                             use_container_width=True)
+                st.dataframe(
+                    summ,
+                    column_config={
+                        "monthly": st.column_config.NumberColumn(format="$%.0f"),
+                        "annual": st.column_config.NumberColumn(format="$%.0f"),
+                    },
+                    use_container_width=True,
+                )
 
             with t_lines:
                 st.subheader("Line items (disposition -> target -> model)")
@@ -708,8 +714,13 @@ for the same app workloads before you commit to a target.
                                     "component", "sku", "rate_basis", "quantity", "hours",
                                     "storage_gb", "monthly"]
                         if c in lines.columns]
-                st.dataframe(lines[cols].style.format({"monthly": "${:,.0f}"}),
-                             use_container_width=True)
+                st.dataframe(
+                    lines[cols],
+                    column_config={
+                        "monthly": st.column_config.NumberColumn(format="$%.0f"),
+                    },
+                    use_container_width=True,
+                )
 
             with t_mod:
                 st.subheader("Modernization path comparison")
@@ -742,8 +753,15 @@ for the same app workloads before you commit to a target.
                     numeric = list(mdata.select_dtypes(include="number").columns)
                     mchart = mdata.set_index(modern.columns[0])[numeric]
                     st.bar_chart(mchart)
-                    fmt = {c: "${:,.0f}" for c in modern.select_dtypes(include="number").columns}
-                    st.dataframe(modern.style.format(fmt), use_container_width=True)
+                    money_columns = {
+                        c: st.column_config.NumberColumn(format="$%.0f")
+                        for c in modern.select_dtypes(include="number").columns
+                    }
+                    st.dataframe(
+                        modern,
+                        column_config=money_columns,
+                        use_container_width=True,
+                    )
                 else:
                     st.info("No app workloads to compare (modernization applies to app/web/api roles).")
 
