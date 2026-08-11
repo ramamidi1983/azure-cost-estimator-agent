@@ -27,7 +27,7 @@ import json
 import os
 import re
 
-VALID_TARGETS = ["vm", "aca", "aks", "appservice", "hyperscale", "sqldb",
+VALID_TARGETS = ["vm", "avd", "aca", "aks", "appservice", "hyperscale", "sqldb",
                  "postgres", "mysql", "redis", "cosmos", "saas"]
 VALID_TERMS = ["payg", "1y", "3y"]
 

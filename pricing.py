@@ -123,6 +123,31 @@ def blob_hot_lrs(region: str):
     return 0.0208
 
 
+def azure_files_lrs_rate(region: str):
+    """Standard Azure Files LRS data stored rate in $/GB-month."""
+    for it in _query(
+        f"serviceName eq 'Storage' and armRegionName eq '{region}' "
+        "and priceType eq 'Consumption'"
+    ):
+        if (it.get("productName") in ("Files", "Files v2")
+                and it.get("skuName") == "Standard LRS"
+                and it.get("meterName") == "LRS Data Stored"):
+            return it.get("retailPrice")
+    return 0.06
+
+
+def avd_user_rate(region: str, offering: str = "desktop"):
+    """External-user AVD access fee. Eligible internal users normally use 0."""
+    wanted = "Desktop & App Hosting User" if offering == "desktop" else "App Hosting User"
+    for it in _query(
+        f"serviceName eq 'Windows Virtual Desktop' and armRegionName eq '{region}' "
+        "and priceType eq 'Consumption'"
+    ):
+        if it.get("meterName") == wanted:
+            return it.get("retailPrice")
+    return 10.0 if offering == "desktop" else 5.5
+
+
 def meter_price(service, region, meter_eq=None, meter_contains=None,
                 product_contains=None, product_excludes=None, price_type="Consumption"):
     """Generic resolver: first item matching filters -> {payg, sp1y, sp3y, meter, product}."""

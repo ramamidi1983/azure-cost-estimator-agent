@@ -39,6 +39,7 @@ COMMON_SERVICES = [
     "Virtual Machines", "Azure NetApp Files", "Storage", "SQL Database",
     "Azure Database for PostgreSQL", "Azure Database for MySQL", "Azure Cosmos DB",
     "Azure Kubernetes Service", "Azure Container Apps", "Azure App Service",
+    "Windows Virtual Desktop",
     "Redis Cache", "Azure Files", "Bandwidth", "Load Balancer",
     "Application Gateway", "VPN Gateway", "ExpressRoute", "Virtual Network",
     "Azure Firewall", "Azure Monitor", "Log Analytics", "Backup", "Site Recovery",
@@ -284,7 +285,8 @@ def build_context():
     if inv is not None and not getattr(inv, "empty", True):
         inv_cols = [c for c in ["name", "environment", "role", "disposition", "target", "vcpu",
                                 "memory_gb", "os", "storage_gb", "quantity", "hours",
-                                "azure_sku", "unit_price"] if c in inv.columns]
+                                "azure_sku", "unit_price", "users_per_host",
+                                "profile_storage_gb"] if c in inv.columns]
         ctx["inventory_row_count"] = int(len(inv))
         ctx["inventory"] = inv[inv_cols].head(100).to_dict("records")
         # Authoritative full-sheet duplicate/row analytics (NOT limited by the 100-row sample).
@@ -541,6 +543,7 @@ for the same app workloads before you commit to a target.
             "Azure NetApp Files": "anf", "Virtual Machine (IaaS)": "vm",
             "Azure SQL Database": "sqldb", "SQL Hyperscale": "hyperscale",
             "App Service": "appservice", "AKS (containers)": "aks",
+            "Azure Virtual Desktop": "avd",
             "PostgreSQL Flexible": "postgres", "MySQL Flexible": "mysql",
             "Cache for Redis": "redis", "Cosmos DB": "cosmos", "SaaS (per-user)": "saas",
         }
@@ -551,6 +554,7 @@ for the same app workloads before you commit to a target.
         _qty = qa3.number_input("Quantity", min_value=1, value=1, step=1, key="qa_qty")
 
         _vcpu = _mem = _storage = _unit_price = 0.0
+        _users_per_host = _profile_storage_gb = 0.0
         _os = "linux"; _sku = ""
         if _target == "anf":
             b1, b2, b3 = st.columns(3)
@@ -582,6 +586,40 @@ for the same app workloads before you commit to a target.
             _storage = _samt * 1024.0 if _du == "TiB" else _samt
             if _target == "vm":
                 _os = st.radio("OS", ["linux", "windows"], horizontal=True, key="qa_os")
+        elif _target == "avd":
+            b1, b2, b3, b4 = st.columns(4)
+            _qty = b1.number_input("Users", min_value=1, value=100, step=10, key="qa_avd_users")
+            _users_per_host = b2.number_input(
+                "Users per session host", min_value=1, value=10, step=1, key="qa_avd_density"
+            )
+            _vcpu = b3.number_input("vCPU per host", min_value=1.0, value=4.0,
+                                    step=1.0, key="qa_avd_vcpu")
+            _mem = b4.number_input("Memory per host (GB)", min_value=1.0, value=16.0,
+                                   step=1.0, key="qa_avd_mem")
+            c1, c2, c3 = st.columns(3)
+            _profile_storage_gb = c1.number_input(
+                "FSLogix profile GB/user", min_value=0.0, value=30.0,
+                step=5.0, key="qa_avd_profile"
+            )
+            _sku = c2.text_input(
+                "Session host SKU (optional)", value="", placeholder="Standard_D4s_v5",
+                key="qa_avd_sku"
+            )
+            _license = c3.selectbox(
+                "AVD access entitlement",
+                ["Eligible Microsoft 365 / Windows license", "External desktop + apps",
+                 "External apps only"],
+                key="qa_avd_license",
+            )
+            if _license == "External desktop + apps":
+                _unit_price = P.avd_user_rate(st.session_state.p_region, "desktop")
+            elif _license == "External apps only":
+                _unit_price = P.avd_user_rate(st.session_state.p_region, "app")
+            st.caption(
+                "Estimate includes Windows multi-session hosts, Azure Files LRS for FSLogix, "
+                "and the selected access fee. Networking, image management, backup, and support "
+                "are excluded."
+            )
         elif _target in ("sqldb", "hyperscale", "postgres", "mysql"):
             b1, b2, b3 = st.columns(3)
             _vcpu = b1.number_input("vCores", min_value=1.0, value=4.0, step=1.0, key="qa_vcore")
@@ -608,6 +646,8 @@ for the same app workloads before you commit to a target.
                 "disposition": "", "target": _target, "quantity": int(_qty),
                 "vcpu": _vcpu, "memory_gb": _mem, "storage_gb": _storage,
                 "os": _os, "azure_sku": _sku, "unit_price": _unit_price, "hours": E.HOURS,
+                "users_per_host": _users_per_host,
+                "profile_storage_gb": _profile_storage_gb,
             })
             st.success(f"Added {_name} ({_svc_label}). Pricing updated below.")
             st.rerun()

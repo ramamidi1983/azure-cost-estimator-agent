@@ -1,4 +1,4 @@
-name,environment,role,disposition,target,vcpu,memory_gb,os,storage_gb,quantity,hours,azure_sku,unit_price
+name,environment,role,disposition,target,vcpu,memory_gb,os,storage_gb,quantity,hours,azure_sku,unit_price,users_per_host,profile_storage_gb
 order-web,Prod,web app,Replatform,,4,16,linux,0,3,730,,
 customer-api,Prod,api app,Refactor,,4,16,linux,0,2,730,,
 legacy-monolith,Prod,online,Rehost,,8,32,windows,0,2,730,,
@@ -10,6 +10,7 @@ session-cache,Prod,redis cache,Replatform,,0,6,linux,0,1,730,,
 product-catalog,Prod,cosmos database,Modernize,,0,0,linux,200,1,730,,
 unlabeled-server,Prod,file server,,,4,16,windows,0,1,730,,
 copilot-licenses,Prod,productivity,Repurchase,saas,0,0,,0,150,730,,30
+corporate-desktops,Prod,virtual desktops,,avd,4,16,windows,0,100,730,,0,10,30
 dev-app,NonProd,web app,Replatform,,4,16,linux,0,2,264,,
 dev-db,NonProd,sql database,Replatform,,8,0,linux,1000,1,730,,
 old-reporting,Prod,reporting,Retire,,4,8,windows,0,1,730,,

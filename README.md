@@ -21,7 +21,12 @@ Built from the pricing + workbook pipeline proven on the RFP-Carnival and Goodye
 - **Combination**: mix all of the above in one inventory; results group by model on the Summary sheet.
 
 ## Inventory columns
-`name, environment(Prod/NonProd), role, disposition(Rehost|Replatform|Refactor|Modernize|Repurchase|Retire...), target(optional: vm|aca|aks|appservice|hyperscale|sqldb|postgres|mysql|redis|cosmos|saas), vcpu, memory_gb, os(linux|windows), storage_gb, quantity, hours, azure_sku(optional), unit_price(SaaS only)`
+`name, environment(Prod/NonProd), role, disposition(Rehost|Replatform|Refactor|Modernize|Repurchase|Retire...), target(optional: vm|avd|aca|aks|appservice|hyperscale|sqldb|postgres|mysql|redis|cosmos|saas), vcpu, memory_gb, os(linux|windows), storage_gb, quantity, hours, azure_sku(optional), unit_price(SaaS/AVD), users_per_host(AVD), profile_storage_gb(AVD)`
+
+For `target=avd`, `quantity` is the user count, `vcpu`/`memory_gb` size each session
+host, `users_per_host` controls host density, `profile_storage_gb` sizes FSLogix storage
+per user, and `unit_price` is an optional AVD external-user access fee. Use zero when
+users already have eligible Microsoft 365 or Windows licenses.
 
 Leave `disposition` **and** `target` blank → priced as standard IaaS (VM). See `samples/sample_inventory.csv`.
 

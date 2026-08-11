@@ -13,7 +13,8 @@ If a row has NO disposition and NO explicit `target`, it DEFAULTS TO standard Ia
 Inventory columns (CSV/XLSX, case-insensitive):
   name, environment(Prod/NonProd), role, disposition, target(optional override),
   vcpu, memory_gb, os(linux|windows), storage_gb, quantity, hours,
-  azure_sku(optional), unit_price(SaaS $/user/mo)
+  azure_sku(optional), unit_price(SaaS/AVD $/user/mo),
+  users_per_host(AVD), profile_storage_gb(AVD per user)
 """
 import os
 import re
@@ -65,8 +66,13 @@ _COLUMN_ALIASES = [
     ("hours", ["hours", "hours mo", "hours month", "monthly hours", "run hours"]),
     ("azure_sku", ["azure sku", "sku", "vm sku", "instance type", "azure type", "vm size", "size"]),
     ("unit_price", ["unit price", "license cost", "price per user", "unit cost", "list price"]),
+    ("users_per_host", ["users per host", "users/host", "avd users per host",
+                        "session density", "user density"]),
+    ("profile_storage_gb", ["profile storage gb", "profile gb", "fslogix gb",
+                            "fslogix profile gb", "storage per user gb"]),
 ]
-_NUMERIC = ["vcpu", "memory_gb", "storage_gb", "quantity", "hours", "unit_price"]
+_NUMERIC = ["vcpu", "memory_gb", "storage_gb", "quantity", "hours", "unit_price",
+            "users_per_host", "profile_storage_gb"]
 
 
 def _resolve_os(value, default_os="linux"):
@@ -417,6 +423,36 @@ def cost_saas(users, unit_price):
             "monthly": m, "compute_monthly": m, "storage_monthly": 0.0}
 
 
+def cost_avd(users, users_per_host, vcpu, mem, profile_storage_gb, hours, term,
+             region, sku=None, access_fee_per_user=0.0):
+    """AVD pooled-host estimate: session hosts + FSLogix profiles + optional access fee."""
+    users = max(int(users or 0), 0)
+    density = max(int(users_per_host or 1), 1)
+    hosts = max((users + density - 1) // density, 1) if users else 0
+    host = cost_vm(
+        vcpu, mem, "windows", hours, hosts, term, region,
+        ahb=True, sku=sku, storage=0.0,
+    )
+    profiles = users * max(float(profile_storage_gb or 0.0), 0.0)
+    storage = profiles * P.azure_files_lrs_rate(region)
+    license_cost = users * max(float(access_fee_per_user or 0.0), 0.0)
+    compute = host["compute_monthly"]
+    return {
+        "sku": f"AVD {hosts}x {host['sku']}",
+        "model": "End User Computing (AVD)",
+        "rate_basis": f"{host['rate_basis']}; {users} users / {density} per host",
+        "monthly": compute + storage + license_cost,
+        "compute_monthly": compute,
+        "storage_monthly": storage,
+        "license_monthly": license_cost,
+        "storage_sku": "Azure Files LRS (FSLogix)",
+        "license_sku": "AVD user access" if license_cost else "",
+        "session_hosts": hosts,
+        "users_per_host": density,
+        "profile_storage_gb": profile_storage_gb,
+    }
+
+
 def cost_anf(storage, qty, region, tier="Standard", term="payg"):
     """Azure NetApp Files: provisioned capacity priced $/GiB-month. Storage-only service
     (no compute line). Minimum provisioned capacity pool is 100 GiB. The pricing term
@@ -626,6 +662,8 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
         if sku_hint.lower() in ("nan", "none"):
             sku_hint = ""
         unit_price = float(r.get("unit_price", 0) or 0)
+        users_per_host = float(r.get("users_per_host", 0) or 0)
+        profile_storage_gb = float(r.get("profile_storage_gb", 0) or 0)
 
         target, disp_used = resolve_target(disp, role, name, override,
                                            anf_autodetect=opts["anf_autodetect"])
@@ -633,7 +671,8 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
                 and target not in ("skip", "saas")
                 and _is_container_candidate(role, name, disp, override)):
             target = opts["container_strategy"]
-        base = {"name": name, "environment": env, "role": role, "disposition": disp or "(none->IaaS)",
+        shown_disp = disp or ("explicit target" if override else "(none->IaaS)")
+        base = {"name": name, "environment": env, "role": role, "disposition": shown_disp,
                 "target": target, "quantity": qty, "region": region,
                 "os": os_type, "vcpu": vcpu, "memory_gb": mem, "storage_gb": storage}
         if target == "skip":
@@ -670,6 +709,12 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
             c = cost_cosmos(storage and storage * 10 or 4000, storage, qty, term, region)
         elif target == "saas":
             c = cost_saas(qty, unit_price)
+        elif target == "avd":
+            c = cost_avd(
+                qty, users_per_host, vcpu, mem,
+                profile_storage_gb or storage, hours, term, region,
+                sku_hint or None, unit_price,
+            )
         elif target in ("anf", "netapp"):
             _anf_tier = sku_hint.capitalize() if sku_hint.lower() in ("standard", "premium", "ultra") else "Standard"
             c = cost_anf(storage, qty, region, tier=_anf_tier, term=term)
@@ -681,12 +726,15 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
         storage_monthly = float(c.get("storage_monthly", 0.0) or 0.0)
         compute_monthly = float(c.get("compute_monthly", c.get("monthly", 0.0)) or 0.0)
         storage_sku = c.get("storage_sku") or f"{c.get('model', '')} storage"
+        license_monthly = float(c.get("license_monthly", 0.0) or 0.0)
 
         comp_row = {k: v for k, v in base.items()
                     if k not in ("compute_monthly", "storage_monthly", "storage_sku")}
         comp_row["component"] = "Compute"
         comp_row["monthly"] = compute_monthly
         comp_row["storage_gb"] = 0.0
+        if target == "avd":
+            comp_row["quantity"] = c.get("session_hosts", 0)
         # Skip a zero-cost compute row for storage-only services (e.g. Azure NetApp Files).
         if compute_monthly > 0 or storage_monthly <= 0:
             rows.append(comp_row)
@@ -704,6 +752,19 @@ def estimate(df, region="eastus", term="1y", ahb=False, resiliency=False, defaul
             stor_row["vcpu"] = 0.0
             stor_row["memory_gb"] = 0.0
             rows.append(stor_row)
+
+        if license_monthly > 0:
+            lic_row = {k: v for k, v in base.items()
+                       if k not in ("compute_monthly", "storage_monthly", "storage_sku",
+                                    "license_monthly", "license_sku")}
+            lic_row["component"] = "License"
+            lic_row["monthly"] = license_monthly
+            lic_row["sku"] = c.get("license_sku") or "AVD user access"
+            lic_row["rate_basis"] = f"${unit_price:.2f}/user/month"
+            lic_row["vcpu"] = 0.0
+            lic_row["memory_gb"] = 0.0
+            lic_row["storage_gb"] = 0.0
+            rows.append(lic_row)
 
     if opts["pool_aks"]:
         fee = P.aks_cluster_fee(region) * HOURS

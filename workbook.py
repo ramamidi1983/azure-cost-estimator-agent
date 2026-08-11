@@ -80,6 +80,8 @@ DETAIL_COLS = [
     ("memory_gb", "Memory (GB)", 12, NUM1),
     ("storage_gb", "Storage (GB)", 12, NUM0),
     ("quantity", "Qty", 7, NUM0),
+    ("users_per_host", "Users / Host", 12, NUM0),
+    ("profile_storage_gb", "Profile GB / User", 16, NUM1),
     ("monthly", "Monthly ($)", 14, CUR0),
 ]
 

@@ -50,6 +50,7 @@ class ContainerOptimizationTests(unittest.TestCase):
             patch("estimator.P.aks_cluster_fee", return_value=0.10),
             patch("estimator.P.aca_rates", return_value=ACA_RATES),
             patch("estimator.P.appservice_price", return_value=VM_RATE),
+            patch("estimator.P.azure_files_lrs_rate", return_value=0.06),
         ]
         for item in self.pricing:
             item.start()
@@ -173,6 +174,29 @@ class ContainerOptimizationTests(unittest.TestCase):
         )
         self.assertTrue((lines["target"] == "vm").all())
         self.assertFalse((lines["role"] == "AKS platform").any())
+
+    def test_avd_prices_session_hosts_profiles_and_optional_access(self):
+        avd = pd.DataFrame([{
+            "name": "corporate-desktops",
+            "environment": "Prod",
+            "role": "virtual desktops",
+            "target": "avd",
+            "vcpu": 4,
+            "memory_gb": 16,
+            "quantity": 101,
+            "users_per_host": 10,
+            "profile_storage_gb": 30,
+            "unit_price": 10,
+            "hours": 730,
+        }])
+        lines, _ = E.estimate(avd, term="1y")
+        self.assertEqual(set(lines["component"]), {"Compute", "Storage", "License"})
+        compute = lines[lines["component"] == "Compute"].iloc[0]
+        storage = lines[lines["component"] == "Storage"].iloc[0]
+        license_line = lines[lines["component"] == "License"].iloc[0]
+        self.assertIn("11x", compute["sku"])
+        self.assertAlmostEqual(storage["monthly"], 101 * 30 * 0.06)
+        self.assertAlmostEqual(license_line["monthly"], 101 * 10)
 
 
 if __name__ == "__main__":
